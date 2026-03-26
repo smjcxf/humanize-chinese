@@ -14,6 +14,9 @@ import argparse
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
+# Module-level flag: whether to apply noise strategies (strategies 2 & 3)
+_USE_NOISE = True
+
 # Import n-gram statistical model for perplexity feedback
 try:
     from ngram_model import analyze_text as ngram_analyze
@@ -131,6 +134,409 @@ def _compute_burstiness(text):
         return None
     stats = ngram_analyze(text)
     return stats.get('burstiness', None)
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  Strategy 1: Low-frequency bigram injection — WORD_SYNONYMS table
+# ═══════════════════════════════════════════════════════════════════
+
+WORD_SYNONYMS = {
+    # ── 逻辑连接 / 转折 ──
+    '因此': ['所以', '因而', '为此', '故而'],
+    '然而': ['不过', '但', '可是', '只是'],
+    '但是': ['不过', '可是', '只是', '然而'],
+    '虽然': ['尽管', '即便', '就算', '纵然'],
+    '所以': ['因此', '因而', '故而', '于是'],
+    '而且': ['并且', '况且', '何况', '再说'],
+    '或者': ['要么', '抑或', '或是', '还是'],
+    '如果': ['倘若', '假如', '若是', '要是'],
+    '因为': ['由于', '缘于', '出于', '鉴于'],
+    '尽管': ['虽然', '即便', '纵使', '就算'],
+    # ── 动词 / 行为 ──
+    '能够': ['可以', '得以', '足以', '有能力'],
+    '进行': ['开展', '实施', '做', '搞'],
+    '实现': ['达成', '做到', '完成', '办到'],
+    '提高': ['提升', '增强', '改善', '拉高'],
+    '发展': ['推进', '进展', '演进', '推动'],
+    '影响': ['波及', '冲击', '左右', '触动'],
+    '研究': ['探究', '考察', '审视', '钻研'],
+    '表明': ['显示', '说明', '反映', '揭示'],
+    '认为': ['觉得', '以为', '判断', '主张'],
+    '需要': ['有必要', '须', '要', '得'],
+    '使用': ['运用', '采用', '用', '动用'],
+    '具有': ['带有', '兼具', '拥有', '含有'],
+    '导致': ['引发', '造成', '招致', '引起'],
+    '提供': ['给出', '供给', '拿出', '呈上'],
+    '分析': ['剖析', '解读', '拆解', '审视'],
+    '促进': ['推动', '助推', '带动', '催动'],
+    '利用': ['借用', '运用', '动用', '凭借'],
+    '建立': ['搭建', '构筑', '组建', '创设'],
+    '引起': ['招来', '激起', '触发', '挑起'],
+    '采取': ['采用', '动用', '使出', '施行'],
+    '包括': ['涵盖', '囊括', '含', '包含'],
+    '产生': ['催生', '引出', '萌生', '冒出'],
+    '增加': ['添加', '追加', '扩充', '加大'],
+    '减少': ['缩减', '削减', '降低', '裁减'],
+    '保持': ['维持', '守住', '留住', '持续'],
+    '解决': ['化解', '处置', '破解', '攻克'],
+    '改变': ['改动', '变更', '扭转', '调整'],
+    '选择': ['挑选', '择取', '选用', '拣'],
+    '支持': ['撑持', '扶持', '相挺', '力挺'],
+    '组成': ['构成', '拼成', '组合', '凑成'],
+    '形成': ['催生', '铸成', '生成', '酿成'],
+    '获得': ['取得', '赢得', '得到', '揽获'],
+    '确定': ['敲定', '锁定', '明确', '定下'],
+    '发现': ['察觉', '觉察', '识破', '看出'],
+    '推动': ['驱动', '助推', '催动', '拉动'],
+    '加强': ['强化', '增强', '夯实', '巩固'],
+    '体现': ['彰显', '凸显', '映射', '折射'],
+    '满足': ['达到', '契合', '符合', '迎合'],
+    '存在': ['有', '潜伏', '隐含', '客观上有'],
+    '属于': ['归属', '算是', '属', '归入'],
+    '考虑': ['斟酌', '权衡', '琢磨', '思量'],
+    '处理': ['打理', '应对', '料理', '处置'],
+    '参与': ['加入', '介入', '参加', '投身'],
+    '创造': ['缔造', '开创', '营造', '打造'],
+    '描述': ['刻画', '勾勒', '叙述', '描绘'],
+    '强调': ['着重', '突出', '力陈', '重申'],
+    '反映': ['映射', '折射', '体现', '呈现'],
+    '应用': ['运用', '采用', '使用', '施用'],
+    '结合': ['融合', '配合', '糅合', '衔接'],
+    '关注': ['留意', '聚焦', '在意', '着眼'],
+    '涉及': ['牵涉', '关乎', '触及', '波及'],
+    '依据': ['按照', '参照', '凭', '根据'],
+    '采用': ['选用', '沿用', '取用', '引用'],
+    # ── 副词 / 程度 ──
+    '目前': ['眼下', '当前', '现阶段', '如今'],
+    '同时': ['与此同时', '此外', '另外', '并且'],
+    '通过': ['借助', '凭借', '经由', '依靠'],
+    '根据': ['按照', '依据', '参照', '依照'],
+    '有效': ['管用', '奏效', '见效', '起作用'],
+    '基于': ['立足于', '依托', '以…为基础', '仰赖'],
+    '对于': ['针对', '就', '关于', '面对'],
+    '非常': ['极其', '十分', '很', '格外'],
+    '已经': ['早已', '业已', '已', '早就'],
+    '完全': ['彻底', '全然', '纯粹', '压根'],
+    '不断': ['持续', '始终', '一再', '反复'],
+    '逐渐': ['渐渐', '慢慢', '一步步', '日渐'],
+    '主要': ['核心', '关键', '首要', '最要紧的'],
+    '一般': ['通常', '往常', '照例', '大抵'],
+    '大量': ['海量', '大批', '众多', '成堆的'],
+    '进一步': ['更', '再', '深入', '继续'],
+    '充分': ['尽情', '透彻', '淋漓', '饱满'],
+    '直接': ['径直', '当面', '立刻', '干脆'],
+    '特别': ['尤其', '格外', '极', '分外'],
+    '一定': ['某种', '相当', '一些', '多少'],
+    '必须': ['得', '务必', '非得', '须'],
+    '可能': ['也许', '兴许', '或许', '大概'],
+    # ── 名词 / 概念 ──
+    '重要': ['关键', '核心', '要紧', '紧要'],
+    '显著': ['明显', '突出', '可观', '醒目'],
+    '问题': ['难题', '困境', '麻烦', '症结'],
+    '方面': ['层面', '维度', '角度', '面向'],
+    '情况': ['状况', '形势', '境况', '局面'],
+    '特点': ['特征', '属性', '标志', '特色'],
+    '方法': ['办法', '手段', '途径', '招数'],
+    '过程': ['历程', '进程', '流程', '经过'],
+    '结果': ['后果', '成果', '产物', '结局'],
+    '条件': ['前提', '条件', '要件', '门槛'],
+    '作用': ['功用', '效用', '效能', '功能'],
+    '内容': ['要素', '成分', '要点', '素材'],
+    '程度': ['幅度', '力度', '地步', '深浅'],
+    '原因': ['缘由', '根源', '起因', '来由'],
+    '目标': ['目的', '指向', '靶心', '方向'],
+    '水平': ['档次', '层次', '段位', '高度'],
+    '范围': ['领域', '地带', '区间', '覆盖面'],
+    '趋势': ['走向', '苗头', '势头', '倾向'],
+    '能力': ['本事', '实力', '功底', '才干'],
+    '优势': ['长处', '强项', '亮点', '好处'],
+    '资源': ['资产', '家底', '储备', '本钱'],
+    '环境': ['氛围', '生态', '场景', '背景'],
+    '系统': ['体系', '架构', '格局', '框架'],
+    '策略': ['打法', '路线', '方案', '对策'],
+}
+
+# ═══════════════════════════════════════════════════════════════════
+#  Strategy 3: Noise expression injection — expression table
+# ═══════════════════════════════════════════════════════════════════
+
+NOISE_EXPRESSIONS = {
+    'hedging': ['说实话', '坦白讲', '客观地说', '实事求是地讲', '平心而论',
+                '老实说', '不夸张地说', '公正地看'],
+    'self_correction': ['或者说', '准确地讲', '换个角度看', '严格来说',
+                        '更确切地说', '往深了讲', '细想一下'],
+    'uncertainty': ['大概', '差不多', '似乎', '或许', '多少有些',
+                    '约莫', '估摸着', '八成'],
+    'transition_casual': ['话说回来', '反过来看', '换句话说', '说到这里',
+                          '再往下想', '回过头看', '顺着这个思路'],
+    'filler': ['当然了', '其实', '说到底', '怎么说呢', '不瞒你说',
+               '你别说', '讲真', '这么说吧'],
+    'personal': ['我觉得', '在我看来', '依我之见', '以我的经验',
+                 '在我的理解里', '就我所知', '我个人倾向于'],
+}
+
+# Academic-safe categories (no oral fillers or personal opinions)
+NOISE_ACADEMIC_CATEGORIES = ['hedging', 'self_correction', 'uncertainty']
+# Academic-specific hedging (more formal)
+NOISE_ACADEMIC_EXPRESSIONS = {
+    'hedging': ['客观地说', '实事求是地讲', '平心而论', '公正地看'],
+    'self_correction': ['准确地讲', '严格来说', '更确切地说', '往深了讲'],
+    'uncertainty': ['大致', '似乎', '或许', '多少', '在一定程度上'],
+}
+
+
+def _load_bigram_freq():
+    """Load bigram frequencies from the n-gram frequency table."""
+    try:
+        from ngram_model import _load_freq
+    except ImportError:
+        try:
+            from scripts.ngram_model import _load_freq
+        except ImportError:
+            return {}
+    freq = _load_freq()
+    return freq.get('bigrams', {})
+
+
+def reduce_high_freq_bigrams(text, strength=0.3):
+    """
+    策略1: 扫描文本中的高频 bigram，尝试用低频同义替换降低可预测性。
+    strength: 0-1，控制替换比例。
+    
+    使用基于词的替换（非位置），避免长度变化导致的错位问题。
+    """
+    bigram_freq = _load_bigram_freq()
+    if not bigram_freq:
+        return _simple_synonym_pass(text, strength)
+
+    chars = re.findall(r'[\u4e00-\u9fff]', text)
+    if len(chars) < 4:
+        return text
+
+    # Step 1: Score each WORD_SYNONYMS word by its surrounding bigram frequency
+    word_scores = []  # (word, total_bigram_freq, count_in_text)
+    for word in WORD_SYNONYMS:
+        count = text.count(word)
+        if count == 0:
+            continue
+        # Compute bigram frequency of this word's characters
+        word_chars = re.findall(r'[\u4e00-\u9fff]', word)
+        total_freq = 0
+        for i in range(len(word_chars) - 1):
+            bg = word_chars[i] + word_chars[i + 1]
+            total_freq += bigram_freq.get(bg, 0)
+        word_scores.append((word, total_freq, count))
+
+    if not word_scores:
+        return text
+
+    # Step 2: Sort by bigram frequency (highest first)
+    word_scores.sort(key=lambda x: x[1], reverse=True)
+
+    # Step 3: Replace top N unique words (controlled by strength)
+    n_replace = max(1, int(len(word_scores) * strength))
+    replaced_words = set()
+
+    for word, freq_score, count in word_scores[:n_replace]:
+        if word in replaced_words:
+            continue
+
+        candidates = WORD_SYNONYMS[word]
+
+        # Pick the candidate with lowest bigram frequency
+        best_candidate = candidates[0]
+        best_freq = float('inf')
+
+        for candidate in candidates:
+            cand_chars = re.findall(r'[\u4e00-\u9fff]', candidate)
+            if not cand_chars:
+                continue
+            total_f = 0
+            for i in range(len(cand_chars) - 1):
+                total_f += bigram_freq.get(cand_chars[i] + cand_chars[i + 1], 0)
+            if total_f < best_freq:
+                best_freq = total_f
+                best_candidate = candidate
+
+        # Replace all occurrences of this word (use sentinel to avoid chains)
+        SENTINEL = '\x00'
+        protected = SENTINEL.join(best_candidate)
+        text = text.replace(word, protected)
+        replaced_words.add(word)
+
+        # Also mark synonyms of the same word to avoid replacing the replacement
+        for syn in candidates:
+            if syn != best_candidate and syn in WORD_SYNONYMS:
+                replaced_words.add(syn)
+
+    # Strip sentinels
+    text = text.replace('\x00', '')
+
+    return text
+
+
+def _simple_synonym_pass(text, strength=0.3):
+    """Fallback: replace a fraction of WORD_SYNONYMS matches randomly."""
+    found = []
+    for word in WORD_SYNONYMS:
+        start = 0
+        while True:
+            pos = text.find(word, start)
+            if pos < 0:
+                break
+            found.append((word, pos))
+            start = pos + len(word)
+    if not found:
+        return text
+    n_replace = max(1, int(len(found) * strength))
+    random.shuffle(found)
+    replaced_positions = set()
+    for word, pos in found[:n_replace]:
+        if any(p in replaced_positions for p in range(pos, pos + len(word))):
+            continue
+        candidate = random.choice(WORD_SYNONYMS[word])
+        text = text[:pos] + candidate + text[pos + len(word):]
+        for p in range(pos, pos + len(candidate)):
+            replaced_positions.add(p)
+    return text
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  Strategy 2: Sentence length randomization
+# ═══════════════════════════════════════════════════════════════════
+
+def randomize_sentence_lengths(text, aggressive=False, seed=None):
+    """
+    策略2: 刻意制造不均匀的句子长度分布。
+    - 随机选 20% 的短句保持极短
+    - 随机选 10% 的句子通过合并拉长
+    - 制造"短-长-短-长-特长-短"的节奏
+    """
+    if seed is not None:
+        random.seed(seed)
+
+    # Split into sentences preserving punctuation
+    parts = re.split(r'([。！？])', text)
+    sentences = []
+    for i in range(0, len(parts) - 1, 2):
+        s = parts[i]
+        p = parts[i + 1] if i + 1 < len(parts) else ''
+        if s.strip():
+            sentences.append((s, p))
+    # Handle trailing text
+    if len(parts) % 2 == 1 and parts[-1].strip():
+        sentences.append((parts[-1], ''))
+
+    if len(sentences) < 4:
+        return text
+
+    merge_rate = 0.15 if not aggressive else 0.25
+    truncate_rate = 0.15 if not aggressive else 0.25
+
+    result = []
+    i = 0
+    while i < len(sentences):
+        s, p = sentences[i]
+        cn_len = len(re.findall(r'[\u4e00-\u9fff]', s))
+
+        # Strategy A: merge short adjacent sentences into a long one
+        if (i + 1 < len(sentences) and random.random() < merge_rate):
+            s2, p2 = sentences[i + 1]
+            cn_len2 = len(re.findall(r'[\u4e00-\u9fff]', s2))
+            # Merge if combined length reasonable (< 100 chars)
+            if cn_len + cn_len2 < 100:
+                merged = s.rstrip() + '，' + s2.lstrip()
+                result.append(merged + p2)
+                i += 2
+                continue
+
+        # Strategy B: truncate longer sentences to their first clause (creates short punchy sentences)
+        if cn_len > 20 and cn_len < 50 and random.random() < truncate_rate:
+            # Truncate to first clause (split at first comma), keep rest as next sentence
+            comma_pos = s.find('，')
+            if comma_pos > 5 and comma_pos < len(s) - 5:
+                first_part = s[:comma_pos]
+                rest_part = s[comma_pos + 1:]
+                result.append(first_part + p)
+                # Push the rest as a new "sentence" to be processed
+                if rest_part.strip():
+                    result.append(rest_part + '。')
+                i += 1
+                continue
+
+        result.append(s + p)
+        i += 1
+
+    return ''.join(result)
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  Strategy 3: Noise expression injection
+# ═══════════════════════════════════════════════════════════════════
+
+def inject_noise_expressions(text, density=0.15, style='general'):
+    """
+    策略3: 在句子间或句中适当位置插入噪声表达。
+    density: 大约每多少句插入一个（0.15 ≈ 每 6-7 句一个）
+    style: general / academic
+    """
+    if style == 'academic':
+        categories = NOISE_ACADEMIC_CATEGORIES
+        expressions = NOISE_ACADEMIC_EXPRESSIONS
+    else:
+        categories = list(NOISE_EXPRESSIONS.keys())
+        expressions = NOISE_EXPRESSIONS
+
+    # Split into sentences
+    parts = re.split(r'([。！？])', text)
+    sentences = []
+    for i in range(0, len(parts) - 1, 2):
+        s = parts[i]
+        p = parts[i + 1] if i + 1 < len(parts) else ''
+        if s.strip():
+            sentences.append([s, p])
+    if len(parts) % 2 == 1 and parts[-1].strip():
+        sentences.append([parts[-1], ''])
+
+    if len(sentences) < 3:
+        return text
+
+    injected = 0
+    for i in range(len(sentences)):
+        # Skip the last sentence (avoid orphaned expressions)
+        if i >= len(sentences) - 1:
+            continue
+        # Skip very short sentences
+        s_text = sentences[i][0]
+        if len(re.findall(r'[\u4e00-\u9fff]', s_text)) < 8:
+            continue
+        if random.random() > density:
+            continue
+
+        cat = random.choice(categories)
+        expr_list = expressions.get(cat, [])
+        if not expr_list:
+            continue
+        expr = random.choice(expr_list)
+
+        s, p = sentences[i]
+
+        # Decide insertion position
+        if cat in ('hedging', 'filler', 'personal', 'transition_casual'):
+            # Insert at sentence beginning
+            s = expr + '，' + s.lstrip()
+        elif cat in ('self_correction', 'uncertainty'):
+            # Insert mid-sentence at a comma
+            comma_pos = s.find('，')
+            if comma_pos > 3:
+                s = s[:comma_pos + 1] + expr + '，' + s[comma_pos + 1:]
+            else:
+                s = expr + '，' + s.lstrip()
+
+        sentences[i] = [s, p]
+        injected += 1
+
+    return ''.join(s + p for s, p in sentences)
 
 
 # ─── Core Transforms ───
@@ -499,6 +905,21 @@ def humanize(text, scene='general', aggressive=False, seed=None):
     if config.get('shorten_paragraphs', False):
         text = shorten_paragraphs(text)
     
+    # ── NEW: Three perplexity-boosting strategies ──
+    
+    # Strategy 1: Low-frequency bigram injection (always active)
+    bigram_strength = 0.5 if aggressive else 0.3
+    text = reduce_high_freq_bigrams(text, strength=bigram_strength)
+    
+    # Strategy 2 & 3: Noise injection (skipped with --no-noise)
+    if _USE_NOISE:
+        # Strategy 3: Noise expression injection
+        noise_density = 0.25 if aggressive else 0.15
+        text = inject_noise_expressions(text, density=noise_density, style='general')
+        
+        # Strategy 2: Sentence length randomization
+        text = randomize_sentence_lengths(text, aggressive=aggressive, seed=seed)
+    
     # Clean up artifacts
     text = re.sub(r'[，,]{2,}', '，', text)  # Remove double commas
     text = re.sub(r'[。]{2,}', '。', text)    # Remove double periods
@@ -564,12 +985,18 @@ def main():
     parser.add_argument('--seed', type=int, help='随机种子（可复现）')
     parser.add_argument('--no-stats', action='store_true',
                        help='跳过统计优化（困惑度反馈），回退到纯规则替换')
+    parser.add_argument('--no-noise', action='store_true',
+                       help='跳过噪声策略（句长随机化 + 噪声表达插入）')
     
     args = parser.parse_args()
     
     # Toggle stats optimization
     global _USE_STATS
     _USE_STATS = not args.no_stats
+    
+    # Toggle noise strategies
+    global _USE_NOISE
+    _USE_NOISE = not args.no_noise
     
     # Read input
     if args.file:

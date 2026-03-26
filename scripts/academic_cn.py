@@ -601,6 +601,22 @@ def _compute_burstiness(text):
     return stats.get('burstiness', None)
 
 
+# Import perplexity-boosting strategies from humanize_cn
+try:
+    from humanize_cn import (reduce_high_freq_bigrams, randomize_sentence_lengths,
+                             inject_noise_expressions)
+except ImportError:
+    try:
+        from scripts.humanize_cn import (reduce_high_freq_bigrams, randomize_sentence_lengths,
+                                         inject_noise_expressions)
+    except ImportError:
+        reduce_high_freq_bigrams = None
+        randomize_sentence_lengths = None
+        inject_noise_expressions = None
+
+# Module-level flag: whether to apply noise strategies
+_USE_NOISE = True
+
 HEDGING_INJECTIONS = [
     '在一定程度上', '从某种角度看', '初步来看', '大体上',
     '就目前而言', '在多数情况下', '就现有研究来看',
@@ -886,6 +902,24 @@ def humanize_academic(text, aggressive=False, seed=None):
     # 8. Add limitation markers if needed
     text = _add_limitation_markers(text, aggressive)
 
+    # ── NEW: Three perplexity-boosting strategies ──
+    
+    # Strategy 1: Low-frequency bigram injection (always active)
+    if reduce_high_freq_bigrams:
+        bigram_strength = 0.5 if aggressive else 0.3
+        text = reduce_high_freq_bigrams(text, strength=bigram_strength)
+    
+    # Strategy 2 & 3: Noise injection (skipped with --no-noise)
+    if _USE_NOISE:
+        # Strategy 3: Noise expression injection (academic style — restrained)
+        if inject_noise_expressions:
+            noise_density = 0.2 if aggressive else 0.1
+            text = inject_noise_expressions(text, density=noise_density, style='academic')
+        
+        # Strategy 2: Sentence length randomization
+        if randomize_sentence_lengths:
+            text = randomize_sentence_lengths(text, aggressive=aggressive, seed=seed)
+
     # Clean up
     text = re.sub(r'[，,]{2,}', '，', text)
     text = re.sub(r'[。]{2,}', '。', text)
@@ -1100,12 +1134,18 @@ def main():
     parser.add_argument('--seed', type=int, help='随机种子（可复现）')
     parser.add_argument('--no-stats', action='store_true',
                        help='跳过统计优化（困惑度反馈），回退到纯规则替换')
+    parser.add_argument('--no-noise', action='store_true',
+                       help='跳过噪声策略（句长随机化 + 噪声表达插入）')
 
     args = parser.parse_args()
 
     # Toggle stats optimization
     global _USE_STATS
     _USE_STATS = not args.no_stats
+
+    # Toggle noise strategies
+    global _USE_NOISE
+    _USE_NOISE = not args.no_noise
 
     # Read input
     if args.file:
