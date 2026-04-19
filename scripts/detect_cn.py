@@ -422,6 +422,14 @@ def detect_patterns(text):
                 'text': f'局部曲率 {cv.get("curvature_mean", 0):.2f}（> 0.9，每处选词都过于贪心）',
                 'severity': 'statistical',
             })
+
+        # Binoculars dual ngram divergence (HC3 d=1.09, B-path cycle 23)
+        if indicators.get('low_binoculars_diff'):
+            bi = ngram_stats.get('bino', {})
+            issues['stat_low_binoculars_diff'].append({
+                'text': f'双 ngram 对数概率差 {bi.get("mean_lp_diff", 0):.2f}（< -2.2，文本风格过于贴近"平均中文"）',
+                'severity': 'statistical',
+            })
     
     # ── Compute metrics ──
     metrics = {
@@ -465,6 +473,7 @@ STATISTICAL_WEIGHTS = {
     'stat_low_short_sentence_fraction': 12,   # d=1.21, correlated with above but not redundant
     'stat_high_transition_density': 8,        # d=+0.62 tightened thr (HC3 2026-04-19, CNKI 语义逻辑链)
     'stat_high_curvature': 6,                 # d=+0.77 DetectGPT-lite (HC3 2026-04-19)
+    'stat_low_binoculars_diff': 6,            # d=1.09 Binoculars dual ngram (B-path 2026-04-19, low weight to avoid saturating 40-pt cap)
     'stat_low_perplexity': 10,
     'stat_high_top10_bucket': 10,
     'stat_low_surprisal_skew': 9,
@@ -605,6 +614,7 @@ CATEGORY_NAMES = {
     'stat_low_comma_density': ('📊', '逗号停顿偏少'),
     'stat_high_transition_density': ('📊', '过渡词过密'),
     'stat_high_curvature': ('📊', '局部曲率高'),
+    'stat_low_binoculars_diff': ('📊', '双ngram对齐度高'),
 }
 
 def format_output(issues, metrics, score, sentences=None, as_json=False, score_only=False, verbose=False):
@@ -658,6 +668,7 @@ def format_output(issues, metrics, score, sentences=None, as_json=False, score_o
                 'stat_low_surprisal_skew', 'stat_low_surprisal_kurt', 'stat_high_top10_bucket',
                 'stat_low_sentence_length_cv', 'stat_low_short_sentence_fraction',
                 'stat_low_comma_density', 'stat_high_transition_density', 'stat_high_curvature',
+                'stat_low_binoculars_diff',
                 'uniform_paragraphs', 'low_burstiness', 'emotional_flatness', 'repetitive_starters', 'low_entropy']:
         if cat not in issues or not issues[cat]:
             continue

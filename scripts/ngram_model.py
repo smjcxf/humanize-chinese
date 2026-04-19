@@ -434,6 +434,87 @@ def compute_curvature(text, n_positions=50, k_alts=10, seed=42):
     return {'curvature_mean': sum(curvs) / len(curvs), 'n_positions': len(curvs)}
 
 
+# ─── Binoculars dual ngram ratio (B-path 2026-04-19 cycle 23) ───
+#
+# Inspired by Binoculars (Hans et al. ICML 2024, arxiv 2401.12070) and
+# GramGuard (OpenReview 2025 oOf83pSxUP). Trains a secondary char-level trigram
+# on HC3 human_answers (2.3M chars, 80/20 train/holdout split seed=42) and
+# computes log-prob divergence vs the primary ngram.
+#
+# Intuition:
+#   - AI text: trained to produce "average" Chinese → equally predictable under
+#     both ngrams → log-prob ratio close to 1.
+#   - Human text: has idiosyncratic distributional features → ngrams disagree
+#     → ratio diverges from 1.
+#
+# Secondary ngram file: scripts/ngram_freq_cn_human.json (20MB, .gitignored,
+# regenerate via `python scripts/train_ngram_human.py`)
+
+_HUMAN_FREQ_CACHE = None
+_HUMAN_FREQ_FILE = os.path.join(SCRIPT_DIR, 'ngram_freq_cn_human.json')
+
+
+def _load_human_freq():
+    """Lazy-load the secondary (human-biased) ngram frequency table.
+    Returns None if file missing (B-2 not run yet)."""
+    global _HUMAN_FREQ_CACHE
+    if _HUMAN_FREQ_CACHE is not None:
+        return _HUMAN_FREQ_CACHE
+    if not os.path.exists(_HUMAN_FREQ_FILE):
+        _HUMAN_FREQ_CACHE = None
+        return None
+    with open(_HUMAN_FREQ_FILE, 'r', encoding='utf-8') as f:
+        _HUMAN_FREQ_CACHE = json.load(f)
+    for key in ('unigrams', 'bigrams', 'trigrams'):
+        table = _HUMAN_FREQ_CACHE.get(key, {})
+        _HUMAN_FREQ_CACHE[key] = {k: int(v) for k, v in table.items()}
+    return _HUMAN_FREQ_CACHE
+
+
+def compute_binoculars_ratio(text):
+    """Compute Binoculars-style log-prob divergence between primary and human ngrams.
+
+    Returns dict with:
+      available: True if secondary ngram loaded, False if missing
+      mean_lp_diff: mean of (lp_primary - lp_human) per char
+      std_lp_diff: std of lp difference
+      abs_mean_lp_diff: abs(mean_lp_diff) — how far the two ngrams disagree
+      ppl_ratio: 2 ^ mean_lp_diff (ratio of secondary ppl to primary ppl)
+      char_count: chars evaluated
+    """
+    human_freq = _load_human_freq()
+    primary_freq = _load_freq()
+    if human_freq is None:
+        return {'available': False, 'char_count': 0}
+
+    chars = _extract_chinese(text)
+    if len(chars) < 30:
+        return {'available': True, 'char_count': len(chars),
+                'mean_lp_diff': 0.0, 'std_lp_diff': 0.0,
+                'abs_mean_lp_diff': 0.0, 'ppl_ratio': 1.0}
+
+    diffs = []
+    for i in range(2, len(chars)):
+        lp_primary = _trigram_log_prob(chars[i-2], chars[i-1], chars[i], primary_freq)
+        lp_human = _trigram_log_prob(chars[i-2], chars[i-1], chars[i], human_freq)
+        diffs.append(lp_primary - lp_human)
+
+    n = len(diffs)
+    mean_d = sum(diffs) / n
+    var_d = sum((x - mean_d) ** 2 for x in diffs) / n
+    std_d = var_d ** 0.5
+    ppl_ratio = 2 ** mean_d
+
+    return {
+        'available': True,
+        'char_count': len(chars),
+        'mean_lp_diff': mean_d,
+        'std_lp_diff': std_d,
+        'abs_mean_lp_diff': abs(mean_d),
+        'ppl_ratio': ppl_ratio,
+    }
+
+
 # ─── Transition-word density (CNKI 语义逻辑链, HC3 2026-04-19) ───
 #
 # Paper research (memory/research_chinese_aigc_papers_2026-04-19.md Part 1)
@@ -773,6 +854,9 @@ def analyze_text(text):
     # DetectGPT-lite curvature (Fast-DetectGPT-style, HC3 2026-04-19 cycle 10)
     curv = compute_curvature(text)
 
+    # Binoculars dual ngram ratio (B-path cycle 23, gated on secondary ngram file)
+    bino = compute_binoculars_ratio(text)
+
     # Thresholds — conservative, designed for character-level n-gram model.
     #
     # With a small corpus-based model, perplexity direction depends on text style.
@@ -852,6 +936,18 @@ def analyze_text(text):
         # (correlates with transition density, noise > signal at this stage).
         # Disabled again, function kept.
         'high_curvature': False,
+        # Binoculars dual ngram divergence (B-path cycle 23, disabled).
+        # HC3 300+300 calibration showed strong Cohen's d = 1.09, but at
+        # detect_cn's 40-pt stat cap the indicator correlates with existing
+        # signals enough that human avg bumps roughly as much as AI avg,
+        # net-net reducing the gap (75% / 14.7 → 74% / 13.4 with weight 6
+        # + tight threshold). Same saturation issue that parked cycle 8
+        # transition density (d=0.62) and cycle 10 curvature (d=0.77).
+        # `compute_binoculars_ratio` function, cycled training data,
+        # and detect_cn wiring all remain in place for future use when
+        # the stat scoring architecture allows more simultaneous indicators
+        # (Ghostbuster-style LR ensemble or sigmoid-soft-cap).
+        'low_binoculars_diff': False,
     }
 
     return {
@@ -865,6 +961,7 @@ def analyze_text(text):
         'punct': punct,
         'trans': trans,
         'curv': curv,
+        'bino': bino,
         'indicators': indicators,
         'details': {
             'perplexity_result': {
