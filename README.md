@@ -80,7 +80,7 @@
 | **CNKI 三链路情报** | [linggantext 技术博客](https://www.linggantext.com/public/blog/cnki-aigc-detection-guide-2026/) | 知网 AIGC 3.0 官方「语言模式/语义逻辑/知识增强」三链路 |
 | **CiLin 同义词词林** | 哈工大 LTP 同义词词林扩展版 | 38,873 词的同义词映射，`--cilin` 可选启用 |
 
-更多论文与方法学笔记见 `memory/` 目录。**非商业使用免费，任何用户都可以复现所有数值。**
+**非商业使用免费，任何用户都可以复现所有数值。**
 
 ---
 
