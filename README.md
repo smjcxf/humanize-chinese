@@ -1,6 +1,6 @@
 # 🔧 中文 AI 文本去痕迹工具
 
-**免费、本地运行、零依赖。检测 + 改写一步到位。**
+**免费、本地运行、零依赖、零 LLM。检测 + 改写一步到位。**
 
 [![GitHub stars](https://img.shields.io/github/stars/voidborne-d/humanize-chinese?style=flat-square)](https://github.com/voidborne-d/humanize-chinese)
 [![ClawHub](https://img.shields.io/badge/clawhub-humanize--chinese-blue?style=flat-square)](https://clawhub.com/skills/humanize-chinese)
@@ -13,44 +13,101 @@
 ## 30 秒看效果
 
 ```bash
-python scripts/academic_cn.py 论文.txt -o 改后.txt --compare
+./humanize academic 论文.txt -o 改后.txt --compare
 ```
 
 ```
-原文:    79/100 VERY HIGH
-改写后:  12/100 LOW
-✅ 降低了 67 分
+学术专用评分 (11 维度):
+  原文:    92/100 VERY HIGH
+  改写后:  37/100 MEDIUM
+  ✅ 降低了 55 分
+
+通用 AIGC 评分 (同 detect_cn.py):
+  原文:    59/100 HIGH
+  改写后:  35/100 MEDIUM
+  ✅ 降低了 24 分
 ```
 
-就这么简单。不用注册，不用付费，不用联网。
+**三款测试样本平均降低 50+ 分**。不用注册、不用付费、不用联网、不需要 API Key。10k 字符 5 秒搞定（`--quick` 模式 0.3 秒，18× 速度）。
 
 ---
 
 ## 改写前后对比
 
-### 学术论文
+### 🎓 学术论文（VERY HIGH → MEDIUM，降 55 分）
 
-**改写前** 🔴 79分：
+**改写前** 🔴 92分：
 > 本文旨在探讨人工智能对高等教育教学模式的影响，具有重要的理论意义和实践价值。研究表明，人工智能技术已被广泛应用于课堂教学、学生评估和个性化学习等多个方面。
 
-**改写后** 🟢 12分：
+**改写后** 🟡 37分：
 > 本研究聚焦于人工智能对高等教育教学模式的影响，兼具理论探索与实践参考的双重价值。前人研究发现，人工智能技术已广泛用于课堂教学、学生评估和个性化学习等多个方面。
 
-### 通用文本
+### 💬 通用文本（VERY HIGH → HIGH，降 50 分）
 
-**改写前** 🔴 87分：
+**改写前** 🔴 100分：
 > 综上所述，人工智能技术在教育领域具有重要的应用价值和广阔的发展前景。值得注意的是，随着技术的不断发展，AI 将在个性化学习、智能评估等方面发挥越来越重要的作用，为教育行业的数字化转型赋能。
 
-**改写后** 🟢 12分：
+**改写后** 🟠 50分：
 > 简单讲，人工智能技术在教育领域有其独特价值和广阔的进展前景。如今，AI 将在个性化学习、智能评估等维度发挥越来越要紧的作用。
 
-### 社交媒体 → 小红书风格
+### 🌸 社交媒体 → 小红书风格（VERY HIGH → HIGH，降 47 分）
 
-**改写前** 🟠 72分：
-> 在当今快节奏的生活中，时间管理具有至关重要的意义。
+**改写前** 🔴 100分
+**改写后** 🟠 53分（自动先 humanize 去 AI 词，再加入小红书风格要素）
 
-**改写后** 🟢 8分：
-> 姐妹们！说真的，时间管理这事我踩过太多坑了 😭 之前天天加班到半夜，后来摸索出一套方法，现在居然能准点下班了？！
+**所有示例的 AIGC 评分都基于统一检测器 detect_cn.py，使用 seed=42 可复现。**
+
+---
+
+## HC3-Chinese 基准测试
+
+在 [HC3-Chinese](https://github.com/Hello-SimpleAI/chatgpt-comparison-detection)（12,853 对人类/ChatGPT 真实问答）上的实测，100 样本平衡抽样（seed=42，2026-04-19 最新）：
+
+| 指标 | 数值 |
+|---|---|
+| 检测器正确分离率（人类 vs ChatGPT） | **73.0%** |
+| 人类平均分 / ChatGPT 平均分 | 8.8 / 18.8 |
+| 分数差距（检测区分力） | **9.9 分** |
+| humanize 平均降幅 | **4.2 分** |
+| 有降低的样本 | 43/100 |
+| 降幅范围 | [-13, +27] |
+| 段落保留率 | 91.0% |
+
+**按数据集领域：**
+
+| 领域 | ChatGPT 原分 | humanize 后 | 降幅 |
+|---|---|---|---|
+| psychology | 25.6 | 20.2 | -5.4 |
+| medicine | 22.4 | 10.9 | **-11.5** |
+| law | 24.5 | 14.9 | **-9.6** |
+| open_qa | 22.2 | 14.7 | -7.5 |
+| finance | 16.5 | 13.8 | -2.7 |
+| nlpcc_dbqa | 4.2 | 4.1 | -0.1 |
+| baike | 5.0 | 4.1 | -0.9 |
+
+**演进史**（从 Phase 2 到 Phase 3 特征校准）：
+
+| 版本 | 正确分离率 | 分数差距 | 平均降幅 |
+|---|---|---|---|
+| Phase 2 baseline | 51% | 3.1 | +1.6 |
+| + 句长 CV (d=1.22) 和短句占比 (d=1.21) | 62% | 11.2 | +5.3 |
+| + 逗号密度 (HC3 d=-0.47) | **73%** | 9.9 | +4.2 |
+
+**检测 accuracy 从 51% 提到 73%（+22 pts）**，检测区分力翻 3 倍。
+
+**诚实的说明**：
+- 真实 ChatGPT 输出不像「AI 样板文」那么极端，HC3 上 baseline 平均约 19 分（Phase 3 加了强特征后拉高的）
+- 刻板化 AI 文本（论文模板、小红书八股）降幅会大得多，见上方示例
+- 长文本领域（医学/法律/问答/心理学）降幅最大 5-11 分
+- 短文本问答（baike/nlpcc_dbqa）降幅小，因 ChatGPT 原分本就低
+- 所有阈值都基于 HC3-Chinese 300+300 人类-AI Cohen's d 校准——不是拍脑袋设的
+
+自己跑一遍：
+
+```bash
+# 需要先下载 HC3 数据到 ../data/hc3_chinese_all.jsonl
+python evals/run_hc3_benchmark.py --n 100 --seed 42
+```
 
 ---
 
@@ -100,36 +157,48 @@ cp humanize-chinese/claude-code/*.md YOUR_PROJECT/.claude/commands/
 
 ## 快速上手
 
+### 统一 CLI（推荐）
+
+```bash
+./humanize --list
+./humanize detect 论文.txt                       # 检测
+./humanize academic 论文.txt -o 改后.txt --compare # 学术降重
+./humanize rewrite text.txt --quick -o clean.txt  # 通用改写（极速）
+./humanize style text.txt --style xiaohongshu     # 风格转换
+./humanize compare text.txt -a                    # 前后对比
+./humanize <sub> --help                           # 子命令帮助
+```
+
+底层依然是各 `scripts/*_cn.py` 独立脚本，`./humanize` 只是分发器，直接调用旧脚本也完全 OK。
+
 ### 🎓 学术论文降 AIGC 率
 
 ```bash
-# 检测
-python scripts/academic_cn.py 论文.txt
-
-# 改写 + 对比
-python scripts/academic_cn.py 论文.txt -o 改后.txt --compare
-
-# 激进模式（降得更狠）
-python scripts/academic_cn.py 论文.txt -o 改后.txt -a --compare
+./humanize academic 论文.txt                      # 只检测
+./humanize academic 论文.txt -o 改后.txt --compare  # 改写 + 对比
+./humanize academic 论文.txt -o 改后.txt --quick    # 快速模式（跳过统计，~18× 速度）
+./humanize academic 论文.txt -o 改后.txt -a --compare  # 激进模式
 ```
 
 ### 🔍 通用文本去 AI 味
 
 ```bash
-python scripts/detect_cn.py text.txt -v       # 检测
-python scripts/humanize_cn.py text.txt -o clean.txt  # 改写
-python scripts/compare_cn.py text.txt -a       # 对比
+./humanize detect text.txt -v           # 检测（详细）
+./humanize rewrite text.txt -o clean.txt # 改写
+./humanize rewrite text.txt --quick      # 纯替换，极快
+./humanize compare text.txt -a           # 对比
 ```
 
 ### 🎨 风格转换
 
 ```bash
-python scripts/style_cn.py text.txt --style xiaohongshu   # 小红书
-python scripts/style_cn.py text.txt --style zhihu          # 知乎
-python scripts/style_cn.py text.txt --style weibo           # 微博
+./humanize style text.txt --style xiaohongshu   # 小红书
+./humanize style text.txt --style zhihu         # 知乎
+./humanize style text.txt --style weibo         # 微博
 ```
 
 7 种风格：口语化 / 知乎 / 小红书 / 公众号 / 学术 / 文艺 / 微博
+（风格转换会先自动跑一遍 humanize，去掉 AI 高频词，再套风格。`--no-humanize` 关闭。）
 
 ---
 
@@ -137,14 +206,16 @@ python scripts/style_cn.py text.txt --style weibo           # 微博
 
 | 功能 | 说明 |
 |------|------|
-| 🔍 AI 检测 | 20+ 规则维度 + N-gram 困惑度统计，0-100 评分，精确到句子 |
-| 📈 统计分析 | 困惑度 / 突发度 / 段落熵，从概率分布层面检测 AI |
-| ✏️ 智能改写 | 困惑度引导选词 + 低频 bigram 注入 + 句长随机化 + 噪声表达 |
-| 🎓 学术降重 | 10 维度检测 + 120 条学术替换，针对知网/维普/万方 |
-| 🎨 风格转换 | 7 种中文写作风格一键转换 |
-| 📊 前后对比 | 改写前后评分变化一目了然 |
+| 🔍 AI 检测 | 20+ 规则维度 + **HC3-校准**的 8 个统计特征（含 d=1.22 的句长 CV 和 d=1.21 的短句占比），0-100 评分 |
+| 📈 统计层 | 字符级 trigram 困惑度 + DivEye 惊奇度 + GLTR rank 分桶 + 句长 burstiness + 标点密度 |
+| ✏️ 智能改写 | 困惑度引导选词 + 低频 bigram 注入 + 短句插入 + 句长随机化 + **40 paraphrase 模板** + 三档自适应强度 |
+| 🎓 学术降重 | 11 维度检测（含扩散度）+ **122 条学术替换** + 独立 picker 策略，针对知网/维普/万方 |
+| 🎨 风格转换 | 7 种中文写作风格（知乎/小红书/微博/公众号/学术/文艺/口语化） |
+| 📊 前后对比 | 学术分 + 通用分双评分，改写效果一目了然 |
 | 🔄 可复现 | `--seed` 保证相同输入相同输出 |
-| 📦 零依赖 | 纯 Python 标准库，下载即用 |
+| ⚡ 速度 | 10k 字符 `--quick` 模式 0.3 秒，完整模式 5 秒 |
+| 📦 零依赖 | 纯 Python 标准库，下载即用。可选 CiLin 词林（`--cilin`，38873 词 + 语义过滤） |
+| 📐 基准测试 | HC3-Chinese 12853 对人类/AI 真实问答回归测试 |
 
 ---
 
@@ -169,6 +240,7 @@ python scripts/academic_cn.py 论文.txt -o 改后.txt -a --compare
 - 打破每段一样长的结构
 - 加入"可能""在一定程度上"等学术犹豫语
 - "研究表明" → "笔者认为""前人研究发现"
+- 基于 HC3-Chinese Cohen's d 校准的统计特征，学术词表禁用口语候选（不会把"应用"改成"施用"）
 
 ⚠️ 改完通读一遍，确认专业术语没被误改、引用格式正确。建议用知网 AMLC 或维普验证。
 
@@ -187,53 +259,69 @@ python scripts/academic_cn.py 论文.txt -o 改后.txt -a --compare
 
 ## 技术原理
 
-### 两层检测
+### 规则层（看词）
 
-**规则层**（看词）：三段式套路、机械连接词、空洞宏大词、AI 高频词、模板句式、段落结构均匀度……
+三段式套路、机械连接词、空洞宏大词、AI 高频词、模板句式、段落结构均匀度。规则都在 `scripts/patterns_cn.json`，可以自己改。
 
-**统计层**（看分布）：基于 15 万条中文字符 n-gram 频率表：
+### 统计层（看分布）
 
-| 指标 | AI 文本 | 人类文本 |
-|------|---------|----------|
-| 困惑度 | ~231（可预测） | ~533（自然） |
-| 突发度 | 均匀 | 忽简忽繁 |
-| 段落熵 | 每段一样 | 有差异 |
+所有阈值都基于 HC3-Chinese 300+300 人类-AI 对照样本的 Cohen's d 校准，不是拍脑袋设的。
+
+**1. 句长 burstiness (最强信号)** — AI 中文爱写 15-25 字等长句，人类长短交错。灵感来自 AIMS 2025 中文深度学习 AIGC 检测 paper + 知网语言模式链情报。
+   - 句长变异系数 CV (HC3 **Cohen's d = 1.22** — 人类 0.52 vs AI 0.32)
+   - 短句占比 (< 10 字的句子比例，HC3 **Cohen's d = 1.21** — 人类 25% vs AI 2.6%)
+
+**2. 困惑度 (Perplexity)** — 字符序列的平均负对数概率（d = 0.47）。基于 `scripts/ngram_freq_cn.json` 训练语料的字符级 3-gram。
+
+**3. GLTR rank 分桶** ([Gehrmann et al. ACL 2019](https://arxiv.org/abs/1906.04043))
+   - top-10 bucket 占比（AI 更集中在高概率字，d = 0.44）
+
+**4. DivEye surprisal 时间序列** ([Basani & Chen TMLR 2026](https://arxiv.org/abs/2502.00258))
+   - skew（d = 0.41）、excess_kurt（d = 0.29）、spectral_flatness（d = 0.20）
+
+**5. 逗号密度** — 有趣发现：AIMS 2025 paper 说「AI 标点密」但 HC3 实测相反。Q&A corpus 里人类写 casual 文本用更多 commas（4.82/百字 vs AI 3.82/百字，d = -0.47）。加了 `low_comma_density` 指标。
+
+所有 statistical indicators 总分上限 25，和规则层（上限 75）加成最终 0-100。
 
 ### 智能改写
 
-不是盲目替换。每次替换从多候选中**选困惑度最高的**（最不可预测 = 最像人写的）。
+**Picker 策略**：每次替换从多候选中选「困惑度次高」的（最高的常是古语/错字，次高才是自然人类选择）。学术场景额外禁用 30 个口语候选 + 37 个 AI 触发词候选。
 
-三个深度策略：
-1. **低频 bigram 注入**：扫描最高频的字组合，换成低频同义词
-2. **句子长度随机化**：制造不均匀节奏（AI 每句差不多长，人类忽长忽短）
-3. **噪声表达插入**：犹豫语、自我修正、不确定标记（学术模式自动过滤口语）
+**三档自适应强度**：
+- score < 5：**conservative** — 仅短语替换 + 标点清理
+- 5 ≤ score < 25：**moderate** — +restructure + bigram
+- score ≥ 25：**full** — 全量（含噪声注入 + 句长随机化）
 
-效果：
+避免对已经够干净的文本乱加噪音反而更像 AI。
 
-| 文本类型 | 原文 | 改写后 | 激进模式 | 人类参考 |
-|---|---|---|---|---|
-| 通用 | 231 | 306 | 348 | ~533 |
-| 学术 | 174 | 273 | 326 | ~533 |
+**其他技术**：
+- 低频 bigram 注入（把 "系统" × 6 的重复 60% 换成 "架构""体系""框架"）
+- 句长随机化（避免每句差不多长，但保留"X指出，Y"等 attribution 结构）
+- 段落感知（每一步按 `\n\n` 分段处理，不丢段落结构）
+- 可选 CiLin 同义词词林扩展（`--cilin`，38,873 词 JSON）
 
 ---
 
 ## CLI 参数速查
 
+统一 CLI 形式（推荐）：
+
 ```bash
-# 检测
-python scripts/detect_cn.py [file] [-v] [-s] [-j]
+./humanize detect   [file] [-v] [-s] [-j]
+./humanize rewrite  [file] [-o out] [--scene S] [--style S] [-a] [--seed N] [--quick] [--cilin]
+./humanize academic [file] [-o out] [--detect-only] [-a] [--compare] [--quick]
+./humanize style    [file] --style S [-o out] [--no-humanize]
+./humanize compare  [file] [-o out] [--scene S] [-a]
+```
 
-# 改写
-python scripts/humanize_cn.py [file] [-o out] [--scene S] [--style S] [-a] [--seed N]
+等价的独立脚本形式：
 
-# 学术降重
-python scripts/academic_cn.py [file] [-o out] [--detect-only] [-a] [--compare]
-
-# 风格转换
-python scripts/style_cn.py [file] --style S [-o out]
-
-# 对比
-python scripts/compare_cn.py [file] [-o out] [--scene S] [-a]
+```bash
+python scripts/detect_cn.py [file] ...
+python scripts/humanize_cn.py [file] ...
+python scripts/academic_cn.py [file] ...
+python scripts/style_cn.py [file] --style S ...
+python scripts/compare_cn.py [file] ...
 ```
 
 | 参数 | 说明 |
@@ -244,23 +332,21 @@ python scripts/compare_cn.py [file] [-o out] [--scene S] [-a]
 | `-o` | 输出文件 |
 | `-a` | 激进模式 |
 | `--seed N` | 固定随机种子 |
-| `--no-stats` | 关闭统计优化（更快） |
+| `--quick` | 纯替换 + 结构还原，跳过统计优化（**~18× 速度**） |
+| `--no-stats` | 关闭统计优化 |
 | `--no-noise` | 关闭噪声注入和句长随机化 |
+| `--cilin` | 开启 CiLin 同义词扩展（humanize） |
+| `--compare` | 改写前后双评分对比（academic） |
+| `--no-humanize` | style 转换前不先去 AI 词 |
 
 ---
 
 ## 批量处理
 
 ```bash
-for f in *.txt; do echo "=== $f ===" && python scripts/detect_cn.py "$f" -s; done
-for f in *.md; do python scripts/humanize_cn.py "$f" -a -o "${f%.md}_clean.md"; done
+for f in *.txt; do echo "=== $f ===" && ./humanize detect "$f" -s; done
+for f in *.md; do ./humanize rewrite "$f" -a -o "${f%.md}_clean.md"; done
 ```
-
----
-
-## 自定义
-
-所有检测模式、替换词库、权重都在 `scripts/patterns_cn.json`，可以自己改。
 
 ---
 
@@ -271,16 +357,26 @@ for f in *.md; do python scripts/humanize_cn.py "$f" -a -o "${f%.md}_clean.md"; 
 | | 本项目 | Humanizer-zh |
 |---|---|---|
 | 运行方式 | ✅ 独立 CLI，终端直接跑 | 纯 prompt，必须在 Claude Code 内用 |
-| 依赖 | ✅ 零依赖 | 需要 Claude Code + API 额度 |
-| 量化评分 | ✅ 0-100 分 | ❌ 无评分 |
-| 统计检测 | ✅ N-gram 困惑度 + 突发度 + 熵 | ❌ 无 |
-| 学术模式 | ✅ 10 维度 + 120 条替换 | ❌ 无 |
+| 依赖 | ✅ 零依赖、零 LLM、零 token | 需要 Claude Code + API 额度 |
+| 量化评分 | ✅ 0-100 分（学术 + 通用双尺度） | ❌ 无评分 |
+| 统计检测 | ✅ 困惑度 + DivEye + GLTR，HC3 校准 | ❌ 无 |
+| 学术模式 | ✅ 11 维度 + 120 条替换 | ❌ 无 |
 | 风格转换 | ✅ 7 种 | ❌ 无 |
 | 可复现 | ✅ `--seed` | ❌ 每次不同 |
 | 批量处理 | ✅ CLI 管道 | ❌ 只能单篇交互 |
 | 免费 | ✅ 完全免费 | ⚠️ 需要 API 额度 |
+| 基准测试 | ✅ HC3-Chinese 100 样本回归 | ❌ 无 |
 
-简单说：Humanizer-zh 是个好 prompt，但只能在 Claude Code 里用。我们是独立工具，任何环境都能跑。
+简单说：Humanizer-zh 是个好 prompt，但只能在 Claude Code 里用。我们是独立工具，任何环境都能跑，而且每次改动都有 HC3 回归验证。
+
+---
+
+## 局限
+
+- **真实 ChatGPT 输出** 不像网上样板那么极端，HC3 上 baseline 就 8 分左右，平均降幅只有 1.6 分。刻板化 AI 文本降幅明显（可 50+ 分），自然 ChatGPT 文本降幅温和。
+- **统计层不用神经网络**：我们用字符级 n-gram + 时间序列特征，不是 RoBERTa 这类分类器。优点是零依赖，缺点是分类 AUC 不如 SOTA 检测器。
+- **CNKI/维普/万方没有公开 API**，我们无法接入作为 oracle。PaperPass / 朱雀 都有腾讯 T-Sec CAPTCHA 反爬。所以本项目基于自己的检测公式 + HC3 回归测试迭代，不盲信第三方检测器的具体分数。
+- **不保证过 100% 的 AIGC 检测**。改写会降低「刻板 AI 味」，但最终还是要看检测器用什么模型。工具只是帮你更像人写的，不是反检测魔法。
 
 ---
 

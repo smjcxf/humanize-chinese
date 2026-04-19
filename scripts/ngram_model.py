@@ -110,6 +110,7 @@ def compute_perplexity(text, window_size=0):
           - perplexity: overall perplexity (float)
           - avg_log_prob: average log2 probability per character
           - window_perplexities: list of per-window perplexities (if window_size > 0)
+          - log_probs: per-character log prob series (used for DivEye surprisal stats)
           - char_count: number of Chinese characters used
     """
     freq = _load_freq()
@@ -120,6 +121,7 @@ def compute_perplexity(text, window_size=0):
             'perplexity': 0.0,
             'avg_log_prob': 0.0,
             'window_perplexities': [],
+            'log_probs': [],
             'char_count': len(chars),
         }
 
@@ -134,6 +136,7 @@ def compute_perplexity(text, window_size=0):
             'perplexity': 0.0,
             'avg_log_prob': 0.0,
             'window_perplexities': [],
+            'log_probs': [],
             'char_count': len(chars),
         }
 
@@ -155,7 +158,421 @@ def compute_perplexity(text, window_size=0):
         'perplexity': perplexity,
         'avg_log_prob': avg_lp,
         'window_perplexities': window_ppls,
+        'log_probs': log_probs,
         'char_count': len(chars),
+    }
+
+
+# ─── DivEye-style surprisal serialization features ───
+#
+# Based on Basani & Chen, TMLR 2026 ("Diversity Boosts AI-Generated Text Detection"):
+# human text has structured irregularity in its surprisal series — autocorrelation
+# signals (local repetition of predictable/unpredictable runs) and spectral
+# flatness (how "white-noise-y" the surprisal series is).
+#
+# Intuition in Chinese:
+#   - Human writing alternates bursts of common characters (low surprisal)
+#     with rare/creative choices (high surprisal) → non-uniform spectrum.
+#   - LLM writing is smoother — moderate surprisal everywhere → flat spectrum
+#     close to white noise (high flatness).
+
+def _autocorrelation(series, lag):
+    """Pearson autocorrelation of a numeric series at a given lag.
+    Returns 0.0 if series too short or variance zero."""
+    n = len(series)
+    if n <= lag + 2:
+        return 0.0
+    mean = sum(series) / n
+    num = 0.0
+    den = 0.0
+    for i in range(n):
+        d = series[i] - mean
+        den += d * d
+        if i >= lag:
+            num += d * (series[i - lag] - mean)
+    if den <= 0:
+        return 0.0
+    return num / den
+
+
+def _spectral_flatness(series):
+    """
+    Spectral flatness = geometric_mean(|DFT|^2) / arithmetic_mean(|DFT|^2).
+    Range [0, 1]. 1.0 = perfectly white/flat spectrum (AI-like).
+    Lower = more structured (human-like).
+
+    Pure-Python DFT via naive O(N²). OK for N < 500 chars; sample if larger.
+    """
+    n = len(series)
+    if n < 16:
+        return 0.0
+
+    # Subsample if too long (keeps computation under ~20ms for 500-char text)
+    max_n = 256
+    if n > max_n:
+        step = n / max_n
+        series = [series[int(i * step)] for i in range(max_n)]
+        n = max_n
+
+    # De-mean
+    mean = sum(series) / n
+    x = [v - mean for v in series]
+
+    # Compute magnitude-squared of DFT for k = 1..n/2 (skip DC)
+    # Using cos/sin table for speed
+    from math import cos, sin, pi, log, exp
+    power = []
+    half = n // 2
+    for k in range(1, half):
+        re = 0.0
+        im = 0.0
+        for t, val in enumerate(x):
+            angle = -2.0 * pi * k * t / n
+            re += val * cos(angle)
+            im += val * sin(angle)
+        p = re * re + im * im
+        # Floor to avoid log(0)
+        power.append(max(p, 1e-12))
+
+    if not power:
+        return 0.0
+
+    # Geometric mean via log-arith
+    log_sum = sum(log(p) for p in power)
+    geo = exp(log_sum / len(power))
+    arith = sum(power) / len(power)
+    if arith <= 0:
+        return 0.0
+    return geo / arith
+
+
+def _distribution_moments(series):
+    """Skewness and excess kurtosis of series. Returns (skew, kurt) or (0, 0)."""
+    n = len(series)
+    if n < 4:
+        return 0.0, 0.0
+    mean = sum(series) / n
+    var = sum((v - mean) ** 2 for v in series) / n
+    if var <= 0:
+        return 0.0, 0.0
+    std = var ** 0.5
+    skew = sum(((v - mean) / std) ** 3 for v in series) / n
+    kurt = sum(((v - mean) / std) ** 4 for v in series) / n - 3.0
+    return skew, kurt
+
+
+def compute_gltr_buckets(text):
+    """
+    GLTR-style (Gehrmann ACL 2019) rank-bucket distribution.
+
+    For each bigram position (c_{i-1}, c_i) in the text, we look at the ranked
+    list of characters that most often follow c_{i-1} in our corpus, and count
+    which bucket the observed c_i falls into:
+      - top10: c_i is among the 10 most likely followers of c_{i-1}
+      - top100: top 11-100
+      - top1000: top 101-1000
+      - beyond: rank > 1000 or bigram unseen
+
+    AI text tends to favor high-probability continuations (top10-heavy),
+    human text has more "beyond" choices.
+
+    Returns dict with bucket counts, proportions, and a crude "ai_score" from
+    the top10 proportion.
+    """
+    freq = _load_freq()
+    bigrams = freq.get('bigrams', {})
+    if not bigrams:
+        return {}
+
+    chars = _extract_chinese(text)
+    if len(chars) < 30:
+        return {}
+
+    # Precompute ranked followers for each prefix char we see in text
+    # (only compute for prefixes present in text — saves work)
+    prefixes_needed = set(chars[:-1])
+
+    ranked_by_prefix = {}
+    for bg, cnt in bigrams.items():
+        if len(bg) != 2:
+            continue
+        prefix = bg[0]
+        if prefix not in prefixes_needed:
+            continue
+        ranked_by_prefix.setdefault(prefix, []).append((bg[1], cnt))
+    for prefix in ranked_by_prefix:
+        ranked_by_prefix[prefix].sort(key=lambda x: -x[1])
+
+    buckets = {'top10': 0, 'top100': 0, 'top1000': 0, 'beyond': 0}
+
+    for i in range(1, len(chars)):
+        prev = chars[i - 1]
+        curr = chars[i]
+        ranked = ranked_by_prefix.get(prev)
+        if not ranked:
+            buckets['beyond'] += 1
+            continue
+        # Find rank of curr
+        rank = None
+        for j, (ch, _) in enumerate(ranked):
+            if ch == curr:
+                rank = j
+                break
+        if rank is None:
+            buckets['beyond'] += 1
+        elif rank < 10:
+            buckets['top10'] += 1
+        elif rank < 100:
+            buckets['top100'] += 1
+        elif rank < 1000:
+            buckets['top1000'] += 1
+        else:
+            buckets['beyond'] += 1
+
+    total = sum(buckets.values())
+    if total == 0:
+        return {}
+    proportions = {k: v / total for k, v in buckets.items()}
+    return {
+        'counts': buckets,
+        'proportions': proportions,
+        'total': total,
+    }
+
+
+def compute_diveye_features(log_probs):
+    """
+    Compute DivEye-style features from a per-character log-prob series.
+
+    Returns dict with:
+      - autocorr_lag1 / lag2 / lag4 / lag8: lagged autocorrelations
+        (human text typically has higher short-lag autocorrelation)
+      - spectral_flatness: [0, 1], higher = flatter = AI-like
+      - skew, excess_kurt: distribution shape
+    """
+    if len(log_probs) < 16:
+        return {
+            'autocorr_lag1': 0.0,
+            'autocorr_lag2': 0.0,
+            'autocorr_lag4': 0.0,
+            'autocorr_lag8': 0.0,
+            'spectral_flatness': 0.0,
+            'skew': 0.0,
+            'excess_kurt': 0.0,
+        }
+    skew, kurt = _distribution_moments(log_probs)
+    return {
+        'autocorr_lag1': _autocorrelation(log_probs, 1),
+        'autocorr_lag2': _autocorrelation(log_probs, 2),
+        'autocorr_lag4': _autocorrelation(log_probs, 4),
+        'autocorr_lag8': _autocorrelation(log_probs, 8),
+        'spectral_flatness': _spectral_flatness(log_probs),
+        'skew': skew,
+        'excess_kurt': kurt,
+    }
+
+
+# ─── DetectGPT-lite curvature (paper research 2026-04-19 cycle 10) ───
+#
+# For each char position, compute log-prob of actual char minus mean log-prob
+# of top-K alternative chars (from global unigram freq). High curvature =
+# original char much more probable than alternatives = AI (greedy decode).
+# Low curvature = original is one of many plausible choices = human (creative).
+#
+# HC3 200+200 calibration: AI mean curvature 0.673 vs human 0.348, Cohen's d = 0.77.
+# Threshold 0.6 flags 55% AI vs 26% human (spread 29%).
+# Inspired by Fast-DetectGPT (Bao et al. ICLR 2024, arxiv 2310.05130) but replaces
+# the LLM masked-sampling with a lightweight trigram-table alternative lookup.
+
+# Top-500 most common Chinese chars — cached on first call
+_TOP_CHARS_CACHE = None
+
+def _top_chars(k=500):
+    global _TOP_CHARS_CACHE
+    if _TOP_CHARS_CACHE is None:
+        freq = _load_freq()
+        _TOP_CHARS_CACHE = [c for c, _ in sorted(
+            freq['unigrams'].items(), key=lambda x: -x[1]
+        )[:k]]
+    return _TOP_CHARS_CACHE
+
+
+def compute_curvature(text, n_positions=50, k_alts=10, seed=42):
+    """Mean log-prob curvature over sampled positions.
+
+    Returns dict with:
+      curvature_mean: mean of (log_p(actual) - mean log_p(top-K alternatives))
+      n_positions: number of positions evaluated
+    """
+    chars = [c for c in text if '\u4e00' <= c <= '\u9fff']
+    if len(chars) < 30:
+        return {'curvature_mean': 0.0, 'n_positions': 0}
+
+    freq = _load_freq()
+    top = _top_chars()
+    import random as _random
+    rng = _random.Random(seed)
+    positions = list(range(2, len(chars)))
+    if len(positions) > n_positions:
+        positions = rng.sample(positions, n_positions)
+
+    curvs = []
+    for i in positions:
+        c1, c2, actual = chars[i-2], chars[i-1], chars[i]
+        actual_lp = _trigram_log_prob(c1, c2, actual, freq)
+        alt_lps = []
+        for alt in top:
+            if alt == actual: continue
+            alt_lps.append(_trigram_log_prob(c1, c2, alt, freq))
+            if len(alt_lps) >= k_alts:
+                break
+        if alt_lps:
+            curvs.append(actual_lp - sum(alt_lps) / len(alt_lps))
+
+    if not curvs:
+        return {'curvature_mean': 0.0, 'n_positions': 0}
+    return {'curvature_mean': sum(curvs) / len(curvs), 'n_positions': len(curvs)}
+
+
+# ─── Transition-word density (CNKI 语义逻辑链, HC3 2026-04-19) ───
+#
+# Paper research (memory/research_chinese_aigc_papers_2026-04-19.md Part 1)
+# identified CNKI's 语义逻辑链 as relying on transition/logic markers. On
+# HC3-Chinese 300+300 calibration we find ChatGPT uses ~2× more transition
+# phrases than humans (mean 13.7 vs 6.98 per 1000 Chinese chars, Cohen's d = 0.617).
+#
+# NOTE on direction: our earlier hypothesis ("humans use transitions to signal
+# thinking") turned out to be the opposite on HC3 Q&A corpus. ChatGPT overuses
+# formal connectors (然而/此外/综上所述/首先/值得注意的是) because it mimics
+# textbook style. Humans write more casual Q&A with zero-inflated transition use
+# (median 0 per 1000 chars).
+
+_TRANSITION_PHRASES = [
+    # Structural / ordering
+    '首先', '其次', '再次', '最后', '然后', '接下来', '与此同时',
+    # Summary / conclusion
+    '综上所述', '总的来说', '总而言之', '归根结底', '由此可见',
+    '一方面', '另一方面', '换言之', '简而言之',
+    # Spotlight / emphasis
+    '值得注意的是', '需要指出的是', '需要强调的是', '不可否认',
+    '尤其是', '特别是', '尤为', '显著',
+    # Contrast / concession
+    '然而', '不过', '相反', '相较而言', '与之相对', '反之', '反观',
+    '诚然', '固然', '纵然', '尽管如此',
+    # Causation / consequence
+    '因此', '所以', '故而', '由此', '进而', '从而', '基于此',
+    # Elaboration
+    '此外', '另外', '除此之外', '具体而言', '具体来说', '具体地说',
+    '举例来说', '举个例子', '更进一步', '进一步',
+    '事实上', '实际上', '实质上', '本质上',
+    # Hedging — ChatGPT overuses
+    '或许', '不妨', '也许', '大致', '大概', '某种程度上', '一定程度上',
+    '可能', '应当', '应该', '理论上',
+    '需要注意', '需要说明', '值得一提', '请注意',
+]
+
+
+def compute_transition_density(text):
+    """Count occurrences of ChatGPT-style transition phrases per 1000 Chinese chars.
+
+    Uses substring match (no tokenization needed). ChatGPT on HC3 averages 13.7
+    per 1000 chars vs 6.98 for humans (d = 0.617).
+    """
+    cn = sum(1 for c in text if '\u4e00' <= c <= '\u9fff')
+    if cn < 50:
+        return {'count': 0, 'density': 0.0, 'cn_chars': cn}
+    count = sum(text.count(w) for w in _TRANSITION_PHRASES)
+    return {'count': count, 'density': count / cn * 1000, 'cn_chars': cn}
+
+
+# ─── Punctuation density (HC3 calibration 2026-04-19) ───
+#
+# HC3-Chinese finding: humans use MORE punctuation than ChatGPT (opposite of
+# AIMS 2025 claim for academic domain). On HC3 Q&A data:
+#   comma density per 100 non-whitespace chars:
+#     human mean 4.82, AI mean 3.82, Cohen's d = -0.47
+# We flag low_comma_density (< 4.5 per 100 chars) as AI indicator.
+# Reason for direction difference vs AIMS paper: HC3 humans are casual Q&A
+# writers (lots of 啊/吧/吗 with commas), ChatGPT writes cleaner flowing prose
+# with longer uninterrupted clauses.
+
+def compute_punctuation_density(text):
+    """Comma density and total punctuation density per 100 non-ws chars.
+
+    Returns dict with:
+      total_chars: non-whitespace character count
+      comma_count: number of full/half-width commas
+      punct_count: number of any Chinese/ASCII punctuation
+      comma_density: commas per 100 non-ws chars
+      punct_density: total punctuation per 100 non-ws chars
+    """
+    chars = [c for c in text if c.strip()]
+    n = len(chars)
+    if n == 0:
+        return {'total_chars': 0, 'comma_count': 0, 'punct_count': 0,
+                'comma_density': 0.0, 'punct_density': 0.0}
+    commas = sum(1 for c in chars if c in '，,')
+    puncts = sum(1 for c in chars if c in '，。、；：！？（）「」『』“”‘’"\'.,:;!?()[]{}《》—…·')
+    return {
+        'total_chars': n, 'comma_count': commas, 'punct_count': puncts,
+        'comma_density': commas / n * 100,
+        'punct_density': puncts / n * 100,
+    }
+
+
+# ─── Sentence length burstiness (paper research 2026-04-19) ───
+#
+# AI Chinese text: 15-25 char sentences with low CV. Human: mixed short/long, CV 0.5-0.7.
+# Source: AIMS 2025 "Chinese deep learning AIGC detection" + CNKI 三链路 "语言模式链"
+#
+# We separate this from char-level burstiness (compute_burstiness above, which is
+# perplexity-CV within 50-char windows). Sentence-length burstiness is a structural
+# signal — the rhythm between sentence boundaries.
+
+def compute_sentence_length_features(text):
+    """Statistical features of sentence-length distribution.
+
+    Returns:
+      n_sentences: sentences of >= 3 Chinese chars
+      mean_len:    mean Chinese chars per sentence
+      std_len:     population stddev
+      cv:          coefficient of variation (std/mean)
+      short_frac:  fraction of sentences with < 10 Chinese chars
+      long_frac:   fraction of sentences with > 30 Chinese chars
+      equal_mid_frac: fraction in the 15-25 "AI equal-length" band
+    """
+    parts = re.split(r'[。！？\n]', text)
+    lengths = []
+    for p in parts:
+        cn = sum(1 for c in p if '\u4e00' <= c <= '\u9fff')
+        if cn >= 3:
+            lengths.append(cn)
+
+    n = len(lengths)
+    if n < 3:
+        return {
+            'n_sentences': n, 'mean_len': 0.0, 'std_len': 0.0, 'cv': 0.0,
+            'short_frac': 0.0, 'long_frac': 0.0, 'equal_mid_frac': 0.0,
+        }
+
+    mean_len = sum(lengths) / n
+    if mean_len == 0:
+        return {
+            'n_sentences': n, 'mean_len': 0.0, 'std_len': 0.0, 'cv': 0.0,
+            'short_frac': 0.0, 'long_frac': 0.0, 'equal_mid_frac': 0.0,
+        }
+
+    variance = sum((x - mean_len) ** 2 for x in lengths) / n
+    std_len = variance ** 0.5
+    cv = std_len / mean_len
+    short_frac = sum(1 for x in lengths if x < 10) / n
+    long_frac = sum(1 for x in lengths if x > 30) / n
+    equal_mid_frac = sum(1 for x in lengths if 15 <= x <= 25) / n
+
+    return {
+        'n_sentences': n, 'mean_len': mean_len, 'std_len': std_len,
+        'cv': cv, 'short_frac': short_frac, 'long_frac': long_frac,
+        'equal_mid_frac': equal_mid_frac,
     }
 
 
@@ -306,6 +723,7 @@ def analyze_text(text):
       - perplexity: overall perplexity
       - burstiness: CV of windowed perplexity
       - entropy_cv: CV of paragraph entropy
+      - diveye: dict of DivEye-style surprisal features (autocorr, spectral flatness, shape)
       - indicators: dict of boolean flags for AI-like patterns
     """
     chars = _extract_chinese(text)
@@ -317,10 +735,13 @@ def analyze_text(text):
             'burstiness': 0.0,
             'entropy_cv': 0.0,
             'char_count': char_count,
+            'diveye': {},
             'indicators': {
                 'low_perplexity': False,
                 'low_burstiness': False,
                 'uniform_entropy': False,
+                'flat_surprisal_spectrum': False,
+                'low_surprisal_autocorr': False,
             },
             'details': {},
         }
@@ -333,6 +754,24 @@ def analyze_text(text):
 
     # Entropy uniformity
     ent_result = compute_entropy_uniformity(text)
+
+    # DivEye surprisal features — reuse log_probs from compute_perplexity
+    diveye = compute_diveye_features(ppl_result.get('log_probs', []))
+
+    # GLTR rank-bucket distribution
+    gltr = compute_gltr_buckets(text)
+
+    # Sentence-length burstiness (CNKI 语言模式链 / AIMS 2025)
+    sent_len = compute_sentence_length_features(text)
+
+    # Punctuation density (HC3-Chinese calibration 2026-04-19)
+    punct = compute_punctuation_density(text)
+
+    # Transition-word density (CNKI 语义逻辑链 / HC3 2026-04-19)
+    trans = compute_transition_density(text)
+
+    # DetectGPT-lite curvature (Fast-DetectGPT-style, HC3 2026-04-19 cycle 10)
+    curv = compute_curvature(text)
 
     # Thresholds — conservative, designed for character-level n-gram model.
     #
@@ -356,13 +795,67 @@ def analyze_text(text):
     n_windows = burst_result['n_windows']
     n_paras = ent_result['n_paragraphs']
 
+    # DivEye thresholds calibrated on 100-pair HC3-Chinese sample (Cohen's d > 0.25):
+    #   Feature          human_median   ai_median   Cohen_d
+    #   skew             1.514          1.315       0.41
+    #   excess_kurt      0.716          0.035       0.29
+    #   spectral_flatness (auxiliary; d ~0.20)
+    #
+    # Burstiness/entropy_cv had Cohen's d < 0.1 on HC3 — essentially no signal
+    # against naturally-written ChatGPT. Kept as indicators for backward compatibility
+    # and because they still catch the stereotyped AI text the project originally targeted.
+    gltr_top10 = gltr.get('proportions', {}).get('top10', 0.0) if gltr else 0.0
     indicators = {
         # Perplexity in the "formulaic formal" range (100-500) with enough text
         'low_perplexity': 50 < ppl < 500 and char_count >= 200,
-        # Very low burstiness with enough data points
+        # Very low burstiness with enough data points (stereotyped AI)
         'low_burstiness': burst < 0.12 and n_windows >= 6,
-        # Very uniform paragraph entropy with enough paragraphs
+        # Very uniform paragraph entropy with enough paragraphs (stereotyped AI)
         'uniform_entropy': ent_cv < 0.05 and n_paras >= 3,
+        # DivEye: low skewness of per-char log-prob = fewer outlier "creative" choices
+        'low_surprisal_skew': (
+            diveye.get('skew', 2.0) < 1.35 and char_count >= 150
+        ),
+        # DivEye: low kurt = thinner tails = uniform predictability (AI-like)
+        'low_surprisal_kurt': (
+            diveye.get('excess_kurt', 1.0) < 0.35 and char_count >= 150
+        ),
+        # GLTR: high top-10 bucket proportion = AI picks from top-probability continuations
+        # Threshold 0.21 from HC3 midpoint between human (0.19) and AI (0.22) means.
+        'high_top10_bucket': (
+            gltr_top10 > 0.21 and char_count >= 150
+        ),
+        # Sentence-length CV: AI writes formulaic sentences with low length variance.
+        # HC3-Chinese 300+300 calibration (2026-04-19):
+        #   human mean CV 0.52, AI mean CV 0.32, Cohen's d = 1.22
+        # Threshold 0.40 — best tradeoff (flags 81% AI vs 29% human, spread 52%).
+        'low_sentence_length_cv': (
+            sent_len.get('cv', 1.0) < 0.40 and sent_len.get('n_sentences', 0) >= 5
+        ),
+        # Short-sentence fraction: humans frequently write < 10-char sentences,
+        # AI rarely does. HC3 calibration: human mean 24.9%, AI mean 2.6%, d = 1.21.
+        # Flag text with virtually no short sentences (< 8%).
+        'low_short_sentence_fraction': (
+            sent_len.get('short_frac', 1.0) < 0.08 and sent_len.get('n_sentences', 0) >= 5
+        ),
+        # Low comma density (HC3 d = -0.47): AI writes flowing prose with long
+        # uninterrupted clauses; humans punctuate more. Threshold 4.5 per 100 chars
+        # flags 76% AI vs 44% human (spread 31%).
+        'low_comma_density': (
+            punct.get('comma_density', 10.0) < 4.5 and char_count >= 100
+        ),
+        # High transition density — despite HC3 d = +0.62 it correlates too much
+        # with existing indicators in humans who write casual Q&A with transitions.
+        # Adding it reduced HC3 gap 9.9 → 9.4 and avg delta 4.1 → 3.1 (cycle 8
+        # experiment). Disabled but function + list kept for future humanize-side
+        # usage (suppressing transitions in rewritten output is the real win path).
+        'high_transition_density': False,
+        # DetectGPT-lite curvature (HC3 d=0.77). Disabled cycle 10 — despite strong
+        # Cohen's d, adding as indicator marginally hurt HC3 (73% → 72% correct rate).
+        # Root cause: stat score already caps at 25, and ~10% humans also get flagged,
+        # bumping human avg proportionally more than cap-saturated AI avg. Function
+        # kept for future Ghostbuster-style LR ensemble where weak signals combine.
+        'high_curvature': False,
     }
 
     return {
@@ -370,6 +863,12 @@ def analyze_text(text):
         'burstiness': burst,
         'entropy_cv': ent_cv,
         'char_count': char_count,
+        'diveye': diveye,
+        'gltr': gltr if gltr else {},
+        'sent_len': sent_len,
+        'punct': punct,
+        'trans': trans,
+        'curv': curv,
         'indicators': indicators,
         'details': {
             'perplexity_result': {

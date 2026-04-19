@@ -336,25 +336,90 @@ def detect_patterns(text):
     if ngram_analyze and char_count >= 100:
         ngram_stats = ngram_analyze(text)
         indicators = ngram_stats.get('indicators', {})
-        
+        diveye = ngram_stats.get('diveye', {})
+
         if indicators.get('low_perplexity'):
             ppl = ngram_stats['perplexity']
             issues['stat_low_perplexity'].append({
                 'text': f'文本困惑度 {ppl:.1f}（AI 文本通常在此范围内）',
                 'severity': 'statistical',
             })
-        
+
         if indicators.get('low_burstiness'):
             burst = ngram_stats['burstiness']
             issues['stat_low_burstiness'].append({
                 'text': f'困惑度变异系数 {burst:.3f}（过于均匀，缺少人类写作的起伏）',
                 'severity': 'statistical',
             })
-        
+
         if indicators.get('uniform_entropy'):
             ent_cv = ngram_stats['entropy_cv']
             issues['stat_uniform_entropy'].append({
                 'text': f'段落熵变异系数 {ent_cv:.3f}（段落间复杂度过于一致）',
+                'severity': 'statistical',
+            })
+
+        # DivEye surprisal-series features (SOTA, TMLR 2026)
+        if indicators.get('low_surprisal_skew'):
+            sk = diveye.get('skew', 0)
+            issues['stat_low_surprisal_skew'].append({
+                'text': f'困惑度偏度 {sk:.2f}（< 1.35，缺少创造性用字的尾部）',
+                'severity': 'statistical',
+            })
+
+        if indicators.get('low_surprisal_kurt'):
+            kt = diveye.get('excess_kurt', 0)
+            issues['stat_low_surprisal_kurt'].append({
+                'text': f'困惑度峰度 {kt:.2f}（< 0.35，分布过于平均）',
+                'severity': 'statistical',
+            })
+
+        # GLTR rank-bucket signal (Gehrmann ACL 2019)
+        if indicators.get('high_top10_bucket'):
+            gltr = ngram_stats.get('gltr', {})
+            prop = gltr.get('proportions', {}).get('top10', 0) if gltr else 0
+            issues['stat_high_top10_bucket'].append({
+                'text': f'高频续接占比 {prop:.1%}（> 21%，下一字选最可能的概率过高）',
+                'severity': 'statistical',
+            })
+
+        # Sentence-length CV (CNKI 语言模式链 / AIMS 2025, HC3 d=1.22)
+        if indicators.get('low_sentence_length_cv'):
+            sl = ngram_stats.get('sent_len', {})
+            issues['stat_low_sentence_length_cv'].append({
+                'text': f'句长变异系数 {sl.get("cv", 0):.2f}（< 0.40，句子长度过于均匀，AI 句式特征）',
+                'severity': 'statistical',
+            })
+
+        # Short-sentence fraction (HC3 d=1.21)
+        if indicators.get('low_short_sentence_fraction'):
+            sl = ngram_stats.get('sent_len', {})
+            issues['stat_low_short_sentence_fraction'].append({
+                'text': f'短句占比 {sl.get("short_frac", 0):.1%}（< 8%，几乎无 10 字以内短句）',
+                'severity': 'statistical',
+            })
+
+        # Low comma density (HC3 d=-0.47)
+        if indicators.get('low_comma_density'):
+            pc = ngram_stats.get('punct', {})
+            issues['stat_low_comma_density'].append({
+                'text': f'逗号密度 {pc.get("comma_density", 0):.2f}/百字（< 4.5，句内停顿偏少）',
+                'severity': 'statistical',
+            })
+
+        # High transition density (HC3 d=+0.62, CNKI 语义逻辑链)
+        if indicators.get('high_transition_density'):
+            tr = ngram_stats.get('trans', {})
+            issues['stat_high_transition_density'].append({
+                'text': f'过渡词密度 {tr.get("density", 0):.1f}/千字（> 8，然而/此外/综上所述等连接词过多）',
+                'severity': 'statistical',
+            })
+
+        # DetectGPT-lite curvature (HC3 d=+0.77)
+        if indicators.get('high_curvature'):
+            cv = ngram_stats.get('curv', {})
+            issues['stat_high_curvature'].append({
+                'text': f'局部曲率 {cv.get("curvature_mean", 0):.2f}（> 0.9，每处选词都过于贪心）',
                 'severity': 'statistical',
             })
     
@@ -372,7 +437,12 @@ def detect_patterns(text):
         metrics['perplexity'] = ngram_stats['perplexity']
         metrics['burstiness'] = ngram_stats['burstiness']
         metrics['entropy_cv'] = ngram_stats['entropy_cv']
-    
+        diveye = ngram_stats.get('diveye', {})
+        if diveye:
+            metrics['surprisal_skew'] = diveye.get('skew', 0)
+            metrics['surprisal_kurt'] = diveye.get('excess_kurt', 0)
+            metrics['spectral_flatness'] = diveye.get('spectral_flatness', 0)
+
     return issues, metrics
 
 # ─── Scoring ───
@@ -385,11 +455,23 @@ SEVERITY_WEIGHTS = {
     'statistical': 0,  # statistical features scored separately below
 }
 
-# Statistical feature weights (scored independently, contribute 20-30% of final score)
+# Statistical feature weights (scored independently, contribute 20-30% of final score).
+# Weights roughly proportional to Cohen's d on HC3-Chinese calibration:
+#   sent_len_cv d=1.22 (300 pair), short_sent d=1.21 (300 pair) — strongest signals
+#   perplexity d=0.47, gltr_top10 d=0.44, skew d=0.41, kurt d=0.29,
+#   burstiness d=0.08, entropy_cv d=0.06
 STATISTICAL_WEIGHTS = {
-    'stat_low_perplexity': 12,
-    'stat_low_burstiness': 10,
-    'stat_uniform_entropy': 8,
+    'stat_low_sentence_length_cv': 14,        # d=1.22, paper source AIMS 2025 + CNKI
+    'stat_low_short_sentence_fraction': 12,   # d=1.21, correlated with above but not redundant
+    'stat_high_transition_density': 8,        # d=+0.62 tightened thr (HC3 2026-04-19, CNKI 语义逻辑链)
+    'stat_high_curvature': 6,                 # d=+0.77 DetectGPT-lite (HC3 2026-04-19)
+    'stat_low_perplexity': 10,
+    'stat_high_top10_bucket': 10,
+    'stat_low_surprisal_skew': 9,
+    'stat_low_comma_density': 8,              # d=-0.47 (HC3, inverted from AIMS paper)
+    'stat_low_surprisal_kurt': 6,
+    'stat_low_burstiness': 3,
+    'stat_uniform_entropy': 2,
 }
 
 def calculate_score(issues, metrics):
@@ -511,6 +593,14 @@ CATEGORY_NAMES = {
     'stat_low_perplexity': ('📊', '困惑度异常低'),
     'stat_low_burstiness': ('📊', '困惑度变化均匀'),
     'stat_uniform_entropy': ('📊', '段落熵值均匀'),
+    'stat_low_surprisal_skew': ('📊', '困惑度偏度低'),
+    'stat_low_surprisal_kurt': ('📊', '困惑度峰度低'),
+    'stat_high_top10_bucket': ('📊', 'Top10 续接占比高'),
+    'stat_low_sentence_length_cv': ('📊', '句长过于均匀'),
+    'stat_low_short_sentence_fraction': ('📊', '缺少短句'),
+    'stat_low_comma_density': ('📊', '逗号停顿偏少'),
+    'stat_high_transition_density': ('📊', '过渡词过密'),
+    'stat_high_curvature': ('📊', '局部曲率高'),
 }
 
 def format_output(issues, metrics, score, sentences=None, as_json=False, score_only=False, verbose=False):
@@ -561,6 +651,9 @@ def format_output(issues, metrics, score, sentences=None, as_json=False, score_o
                 'ai_high_freq_words', 'filler_phrases', 'balanced_arguments', 'template_sentences',
                 'hedging_language', 'list_addiction', 'punctuation_overuse', 'excessive_rhetoric',
                 'stat_low_perplexity', 'stat_low_burstiness', 'stat_uniform_entropy',
+                'stat_low_surprisal_skew', 'stat_low_surprisal_kurt', 'stat_high_top10_bucket',
+                'stat_low_sentence_length_cv', 'stat_low_short_sentence_fraction',
+                'stat_low_comma_density', 'stat_high_transition_density', 'stat_high_curvature',
                 'uniform_paragraphs', 'low_burstiness', 'emotional_flatness', 'repetitive_starters', 'low_entropy']:
         if cat not in issues or not issues[cat]:
             continue

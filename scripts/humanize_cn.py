@@ -17,6 +17,11 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 # Module-level flag: whether to apply noise strategies (strategies 2 & 3)
 _USE_NOISE = True
 
+# Module-level flag: whether to expand candidates with CiLin synonyms dict
+# (~40K words, offline). Off by default for deterministic-ish behavior; opt-in
+# via --cilin CLI flag.
+_USE_CILIN = False
+
 # Import n-gram statistical model for perplexity feedback
 try:
     from ngram_model import analyze_text as ngram_analyze
@@ -109,23 +114,29 @@ SCENES = {
 # ─── Stats-Optimized Selection ───
 
 def pick_best_replacement(sentence, old, candidates):
-    """从多个候选替换中选 perplexity 最高的（最不可预测 = 最像人写的）。
-    当 _USE_STATS 关闭、ngram_analyze 不可用、或只有单候选时回退到 random.choice。"""
-    if not _USE_STATS or not ngram_analyze or len(candidates) <= 1:
-        return random.choice(candidates)
+    """从多个候选替换中挑选。
 
-    best_candidate = candidates[0]
-    best_ppl = 0
+    Only perplexity needed for ranking — skip full analyze_text for perf.
+    """
+    if not _USE_STATS or not candidates or len(candidates) <= 1:
+        return random.choice(candidates) if candidates else ''
 
+    try:
+        from ngram_model import compute_perplexity
+    except ImportError:
+        from scripts.ngram_model import compute_perplexity
+
+    scored = []
     for candidate in candidates:
         new_sentence = sentence.replace(old, candidate, 1)
-        stats = ngram_analyze(new_sentence)
-        ppl = stats.get('perplexity', 0)
-        if ppl > best_ppl:
-            best_ppl = ppl
-            best_candidate = candidate
+        ppl_result = compute_perplexity(new_sentence, window_size=0)
+        scored.append((candidate, ppl_result.get('perplexity', 0)))
 
-    return best_candidate
+    scored.sort(key=lambda x: x[1])
+    n = len(scored)
+    if n <= 2:
+        return scored[-1][0]
+    return scored[n - 2][0]
 
 
 def _compute_burstiness(text):
@@ -257,6 +268,142 @@ WORD_SYNONYMS = {
 }
 
 # ═══════════════════════════════════════════════════════════════════
+#  Academic-scene filters for WORD_SYNONYMS
+# ═══════════════════════════════════════════════════════════════════
+
+# Global blacklist: candidates that are themselves detected as AI patterns by
+# detect_cn. Substituting INTO these is self-defeating ("环境"→"生态" triggers
+# empty_grand_words; "作用"→"彰显" triggers ai_high_freq_words). Applies to all scenes.
+# Kept in sync with detect_cn.py CRITICAL_PHRASES + HIGH_SIGNAL_PHRASES.
+_AI_PATTERN_BLACKLIST = {
+    # empty_grand_words
+    '赋能', '闭环', '智慧时代', '数字化转型', '生态', '愿景', '顶层设计',
+    '协同增效', '降本增效', '打通壁垒', '深度融合', '创新驱动', '全方位',
+    '多维度', '系统性',
+    # ai_high_freq_words
+    '助力', '彰显', '凸显', '焕发', '深度剖析', '加持', '赛道', '破圈',
+    '出圈', '颠覆', '革新', '底层逻辑', '抓手', '链路', '触达', '心智',
+    '沉淀', '对齐', '拉通', '复盘', '迭代',
+}
+
+
+# Words that should NOT be substituted at all in academic context.
+# These are core academic vocabulary; mechanical substitution ("研究"→"探究" etc.)
+# degrades readability without reducing AIGC detection score.
+ACADEMIC_PRESERVE_WORDS = {
+    '研究', '分析', '发现', '指出', '表明', '认为', '显示', '揭示',
+    '系统', '方法', '结果', '数据', '效果', '作用', '问题', '目标',
+    '应用', '提高', '能力', '影响', '过程', '条件',
+}
+
+# Candidates that are too colloquial / archaic / informal for academic writing.
+# When scene='academic', these will be filtered out of the synonym candidate pool
+# before picking. If only a blacklisted candidate remains, the original word is kept.
+ACADEMIC_BLACKLIST_CANDIDATES = {
+    # 动词 - 过于口语或古语
+    '施用', '拉高', '搞', '弄', '整', '做', '做过', '搞定', '摆平',
+    '挑', '琢磨', '思量', '打理', '料理', '撑持', '揽获', '敲定',
+    '识破', '觉察', '察觉', '看出', '拆解', '宛若',
+    # 名词/形容词 - 口语化
+    '本事', '家底', '本钱', '档次', '段位', '地带', '招数', '打法',
+    '麻烦', '症结', '亮点', '好处', '苗头', '势头', '门槛',
+    '成堆的', '最要紧的', '海量',
+    # 程度词 - 口语
+    '压根', '干脆', '径直', '当面', '兴许', '估摸着', '约莫', '大抵',
+    '早就', '业已',
+    # 架构/框架 对 "系统" - 过于泛化
+    '架构', '框架',
+    # 探究/剖析/审视 对 "研究/分析" - 虽然偶尔可用但大规模替换破坏学术调性
+    '探究', '剖析',
+    # 连接词口语化
+    '缘于', '缘由', '来由',
+}
+
+
+def _filter_candidates_for_scene(word, candidates, scene):
+    """过滤不适合场景的候选词。返回过滤后的列表，若全被过滤则返回原列表。
+
+    Always filters _AI_PATTERN_BLACKLIST (candidates that trigger detect_cn itself).
+    Additionally filters ACADEMIC_BLACKLIST_CANDIDATES when scene='academic'.
+    """
+    filtered = [c for c in candidates if c not in _AI_PATTERN_BLACKLIST]
+    if scene == 'academic':
+        filtered = [c for c in filtered if c not in ACADEMIC_BLACKLIST_CANDIDATES]
+    return filtered if filtered else candidates
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  CiLin (哈工大同义词词林扩展版) - optional expansion
+# ═══════════════════════════════════════════════════════════════════
+
+_CILIN_CACHE = None
+_CILIN_FILE = os.path.join(SCRIPT_DIR, 'cilin_synonyms.json')
+
+# Curated blacklist of CiLin candidates that are archaic, domain-mismatched,
+# or POS-mismatched for common Chinese words. CiLin's "synonym" relation is
+# taxonomic (not substitutable), so these slip through — manually filtered
+# from spot-checks on 应用/发展/重要/系统/分析/提高/使用.
+_CILIN_BLACKLIST = {
+    # Archaic / 文言 — "conscript/order-around" tone for 使用/应用
+    '使唤', '使役', '役使', '差遣', '驱使',
+    # Mismatched POS (noun / noun-phrase for adjective 重要)
+    '严重性', '要紧性', '关键性', '基本点', '国本',
+    # Domain-mismatched (upward-numerical for 发展)
+    '上扬', '上移', '上进', '升华',
+    # Archaic / classical for 系统
+    '板眼', '伦次', '条贯', '战线',
+    # Overly colloquial / butcher-y for 分析
+    '剖解', '解构',
+    # Redundant / unnatural
+    '显要', '要害', '紧要',
+}
+
+
+def _load_cilin():
+    """Lazy-load filtered CiLin synonyms. Returns dict[word] -> list[candidate] or empty dict."""
+    global _CILIN_CACHE
+    if _CILIN_CACHE is not None:
+        return _CILIN_CACHE
+    if not os.path.exists(_CILIN_FILE):
+        _CILIN_CACHE = {}
+        return _CILIN_CACHE
+    try:
+        with open(_CILIN_FILE, 'r', encoding='utf-8') as f:
+            _CILIN_CACHE = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        _CILIN_CACHE = {}
+    return _CILIN_CACHE
+
+
+def expand_with_cilin(word, candidates, scene='general'):
+    """Expand a candidate list with CiLin synonyms (filtered through blacklists).
+
+    Only used when enabled via --cilin CLI flag. CiLin has ~40K words vs the
+    hand-curated ~200 in WORD_SYNONYMS, so expansion gives much more variety —
+    but CiLin's "synonym" relation is loose (taxonomic, not strictly substitutable)
+    and contains archaic/idiomatic candidates. Always filter through scene blacklist.
+    """
+    cilin = _load_cilin()
+    extras = cilin.get(word, [])
+    if not extras:
+        return candidates
+    existing = set(candidates)
+    filtered = []
+    for c in extras:
+        if c in existing:
+            continue
+        if c in _AI_PATTERN_BLACKLIST:
+            continue
+        if c in _CILIN_BLACKLIST:
+            continue  # semantic/POS/register mismatch, curated
+        if scene == 'academic' and c in ACADEMIC_BLACKLIST_CANDIDATES:
+            continue
+        filtered.append(c)
+        existing.add(c)
+    return list(candidates) + filtered
+
+
+# ═══════════════════════════════════════════════════════════════════
 #  Strategy 3: Noise expression injection — expression table
 # ═══════════════════════════════════════════════════════════════════
 
@@ -298,24 +445,30 @@ def _load_bigram_freq():
     return freq.get('bigrams', {})
 
 
-def reduce_high_freq_bigrams(text, strength=0.3):
+def reduce_high_freq_bigrams(text, strength=0.3, scene='general'):
     """
     策略1: 扫描文本中的高频 bigram，尝试用低频同义替换降低可预测性。
     strength: 0-1，控制替换比例。
-    
+    scene: 'general' / 'academic' / 'social' —
+      - academic: 跳过 ACADEMIC_PRESERVE_WORDS，候选过 ACADEMIC_BLACKLIST_CANDIDATES
+
     使用基于词的替换（非位置），避免长度变化导致的错位问题。
     """
     bigram_freq = _load_bigram_freq()
     if not bigram_freq:
-        return _simple_synonym_pass(text, strength)
+        return _simple_synonym_pass(text, strength, scene=scene)
 
     chars = re.findall(r'[\u4e00-\u9fff]', text)
     if len(chars) < 4:
         return text
 
+    preserve = ACADEMIC_PRESERVE_WORDS if scene == 'academic' else set()
+
     # Step 1: Score each WORD_SYNONYMS word by its surrounding bigram frequency
     word_scores = []  # (word, total_bigram_freq, count_in_text)
     for word in WORD_SYNONYMS:
+        if word in preserve:
+            continue
         count = text.count(word)
         if count == 0:
             continue
@@ -341,12 +494,12 @@ def reduce_high_freq_bigrams(text, strength=0.3):
         if word in replaced_words:
             continue
 
-        candidates = WORD_SYNONYMS[word]
+        candidates = _filter_candidates_for_scene(word, WORD_SYNONYMS[word], scene)
+        if _USE_CILIN:
+            candidates = expand_with_cilin(word, candidates, scene)
 
-        # Pick the candidate with lowest bigram frequency
-        best_candidate = candidates[0]
-        best_freq = float('inf')
-
+        # Rank candidates by bigram frequency ascending (rarest first)
+        ranked = []
         for candidate in candidates:
             cand_chars = re.findall(r'[\u4e00-\u9fff]', candidate)
             if not cand_chars:
@@ -354,19 +507,60 @@ def reduce_high_freq_bigrams(text, strength=0.3):
             total_f = 0
             for i in range(len(cand_chars) - 1):
                 total_f += bigram_freq.get(cand_chars[i] + cand_chars[i + 1], 0)
-            if total_f < best_freq:
-                best_freq = total_f
-                best_candidate = candidate
+            ranked.append((candidate, total_f))
+        if not ranked:
+            continue
+        ranked.sort(key=lambda x: x[1])
 
-        # Replace all occurrences of this word (use sentinel to avoid chains)
+        # Pick strategy: NOT the rarest (too weird, e.g. 施用/拉高/本事),
+        # but moderately rare — lower third by bigram frequency when possible.
+        n_cand = len(ranked)
+        if n_cand == 1:
+            primary = ranked[0][0]
+        elif n_cand == 2:
+            primary = ranked[0][0]
+        else:
+            idx = min(max(1, n_cand // 3), n_cand - 2)
+            primary = ranked[idx][0]
+
+        # Partial replacement: don't replace EVERY occurrence of the word.
+        # Replacing all creates NEW AI-pattern repetition (e.g. "系统"×6 → "架构"×6).
+        # Keep some original occurrences + mix in alternative candidates for variation.
         SENTINEL = '\x00'
-        protected = SENTINEL.join(best_candidate)
-        text = text.replace(word, protected)
+
+        def _protect(w):
+            return SENTINEL.join(w) if len(w) > 1 else w
+
+        occurrences = [m.start() for m in re.finditer(re.escape(word), text)]
+        if not occurrences:
+            continue
+        # Replace ~60% of occurrences (min 1, always at least the first)
+        n_replace_occ = max(1, int(len(occurrences) * 0.6))
+        # Randomly select which occurrences to replace (deterministic via current seed)
+        to_replace = set(random.sample(range(len(occurrences)), n_replace_occ))
+
+        # Pick alternative candidates for variety when multiple occurrences replaced
+        # (avoid monotone repetition of single replacement)
+        alt_candidates = [c for c, _ in ranked if c != primary] or [primary]
+
+        # Rebuild text by iterating occurrences back-to-front (avoid shifting positions)
+        for k in reversed(range(len(occurrences))):
+            pos = occurrences[k]
+            if k not in to_replace:
+                continue
+            # Pick primary for first replaced occurrence, alternate for others
+            if k == min(to_replace):
+                replacement = primary
+            else:
+                replacement = random.choice([primary] + alt_candidates)
+            protected = _protect(replacement)
+            text = text[:pos] + protected + text[pos + len(word):]
+
         replaced_words.add(word)
 
         # Also mark synonyms of the same word to avoid replacing the replacement
         for syn in candidates:
-            if syn != best_candidate and syn in WORD_SYNONYMS:
+            if syn != primary and syn in WORD_SYNONYMS:
                 replaced_words.add(syn)
 
     # Strip sentinels
@@ -375,10 +569,16 @@ def reduce_high_freq_bigrams(text, strength=0.3):
     return text
 
 
-def _simple_synonym_pass(text, strength=0.3):
-    """Fallback: replace a fraction of WORD_SYNONYMS matches randomly."""
+def _simple_synonym_pass(text, strength=0.3, scene='general'):
+    """Fallback: replace a fraction of WORD_SYNONYMS matches randomly.
+
+    scene: 'academic' filters PRESERVE words and BLACKLIST candidates.
+    """
+    preserve = ACADEMIC_PRESERVE_WORDS if scene == 'academic' else set()
     found = []
     for word in WORD_SYNONYMS:
+        if word in preserve:
+            continue
         start = 0
         while True:
             pos = text.find(word, start)
@@ -394,7 +594,10 @@ def _simple_synonym_pass(text, strength=0.3):
     for word, pos in found[:n_replace]:
         if any(p in replaced_positions for p in range(pos, pos + len(word))):
             continue
-        candidate = random.choice(WORD_SYNONYMS[word])
+        candidates = _filter_candidates_for_scene(word, WORD_SYNONYMS[word], scene)
+        if not candidates:
+            continue
+        candidate = random.choice(candidates)
         text = text[:pos] + candidate + text[pos + len(word):]
         for p in range(pos, pos + len(candidate)):
             replaced_positions.add(p)
@@ -456,6 +659,30 @@ def randomize_sentence_lengths(text, aggressive=False, seed=None):
             comma_pos = s.find('，')
             if comma_pos > 5 and comma_pos < len(s) - 5:
                 first_part = s[:comma_pos]
+                first_stripped = first_part.lstrip()
+                # Guard 1: skip if first part ends in an attribution/reporting verb.
+                # Otherwise "X 指出，" becomes "X 指出。" + bare clause — broken grammar.
+                _attribution_suffixes = (
+                    '指出', '表明', '认为', '揭示', '发现', '显示', '提出',
+                    '说', '称', '讲', '强调', '主张', '断言',
+                )
+                if first_part.endswith(_attribution_suffixes):
+                    result.append(s + p)
+                    i += 1
+                    continue
+                # Guard 2: skip if first part is a subordinate clause (starts with
+                # 随着/鉴于/为了/由于/尽管/虽然/如果 etc.). Splitting at comma would
+                # leave a fragment that can't stand alone: "随着X的发展。Y" is broken.
+                _subordinate_prefixes = (
+                    '随着', '鉴于', '为了', '由于', '尽管', '虽然',
+                    '如果', '假如', '若是', '倘若', '要是', '即便', '纵然',
+                    '除了', '除非', '只要', '只有', '无论', '不管',
+                    '当', '每当', '一旦',
+                )
+                if first_stripped.startswith(_subordinate_prefixes):
+                    result.append(s + p)
+                    i += 1
+                    continue
                 rest_part = s[comma_pos + 1:]
                 result.append(first_part + p)
                 # Push the rest as a new "sentence" to be processed
@@ -770,6 +997,31 @@ def reduce_punctuation(text):
     
     return text
 
+def inject_sentence_particles(text, rate=0.15):
+    """Append casual sentence-ending particles (吧/嘛/呗) to random statements.
+
+    Intended for casual/social/chat scenes only. Skips questions/exclamations
+    (already tonal) and sentences already ending in a particle. Short sentences
+    skipped (too brittle), very long ones skipped (feels forced).
+    """
+    parts = re.split(r'([。！？])', text)
+    particles = ['吧', '嘛', '呗']
+    for i in range(0, len(parts) - 1, 2):
+        sent = parts[i]
+        punct = parts[i + 1] if i + 1 < len(parts) else ''
+        if punct in '！？':
+            continue
+        cn = sum(1 for c in sent if '\u4e00' <= c <= '\u9fff')
+        if cn < 6 or cn > 40:
+            continue
+        rstripped = sent.rstrip()
+        if rstripped and rstripped[-1] in '吧嘛呗呢啊哦嗯哈的了':
+            continue
+        if random.random() < rate:
+            parts[i] = rstripped + random.choice(particles)
+    return ''.join(parts)
+
+
 def add_casual_expressions(text, casualness=0.3):
     """Inject casual/human expressions"""
     if casualness < 0.2:
@@ -871,21 +1123,60 @@ def diversify_vocabulary(text):
 
 # ─── Main Humanize Pipeline ───
 
+def _estimate_source_aiscore(text):
+    """Quick pre-detect of how AI-like the input is. Returns 0-100 score or None."""
+    try:
+        from detect_cn import detect_patterns, calculate_score
+    except ImportError:
+        try:
+            from scripts.detect_cn import detect_patterns, calculate_score
+        except ImportError:
+            return None
+    try:
+        issues, metrics = detect_patterns(text)
+        return calculate_score(issues, metrics)
+    except Exception:
+        return None
+
+
 def humanize(text, scene='general', aggressive=False, seed=None):
-    """Apply all humanization transformations in order"""
+    """Apply all humanization transformations in order.
+
+    Graduated intensity based on source AI-score (pre-detect):
+      - score < 15 (conservative): only phrase replacement + punctuation cleanup
+      - score 15-39 (moderate): + restructure + lighter bigram substitution
+      - score >= 40 (full): entire pipeline including noise injection
+    Aggressive flag forces 'full' tier.
+
+    Rationale: HC3 benchmark showed that full pipeline on already-clean text
+    (source score < 15) adds spurious AI patterns (段落均匀/熵低) via noise
+    injection, sometimes INCREASING detected score. Tiered intensity avoids this.
+    """
     if seed is not None:
         random.seed(seed)
-    
+
     config = SCENES.get(scene, SCENES['general'])
     casualness = config.get('casualness', 0.3)
     if aggressive:
         casualness = min(1.0, casualness + 0.3)
-    
-    # Pass 1: Structure cleanup
+
+    source_score = _estimate_source_aiscore(text)
+    # Tier thresholds calibrated on HC3-Chinese: most naturally-written ChatGPT
+    # scores 5-25 on detect_cn. Full pipeline on very-clean input (< 5) adds
+    # spurious noise. Moderate tier skips noise/sentence-randomization but keeps
+    # everything else. Trade picks up most of the full-tier gains with fewer regressions.
+    if aggressive or source_score is None or source_score >= 25:
+        tier = 'full'
+    elif source_score >= 5:
+        tier = 'moderate'
+    else:
+        tier = 'conservative'
+
+    # Pass 1: Structure cleanup — always run (safe, targeted)
     text = remove_three_part_structure(text)
     text = replace_phrases(text, casualness)
-    
-    # Pass 2: Deep sentence restructuring (句级改写)
+
+    # Pass 2: Deep sentence restructuring — all tiers (with moderate strength in conservative)
     try:
         from restructure_cn import deep_restructure
     except ImportError:
@@ -894,41 +1185,43 @@ def humanize(text, scene='general', aggressive=False, seed=None):
         except ImportError:
             deep_restructure = None
     if deep_restructure:
+        # Conservative keeps restructure but with aggressive=False to be gentler
         text = deep_restructure(text, aggressive=aggressive)
 
-    # Pass 2b: Sentence merge/split (original)
+    # Pass 2b: Sentence merge/split
     if config.get('merge_short', False):
         text = merge_short_sentences(text)
     if config.get('split_long', False):
         text = split_long_sentences(text)
-    
-    # Pass 3: Rhythm and variety
+
+    # Pass 3: Rhythm and variety — diversify all tiers, rhythm only moderate+
     text = reduce_punctuation(text)
     text = diversify_vocabulary(text)
-    
-    if config.get('rhythm_variation', False):
+    if tier != 'conservative' and config.get('rhythm_variation', False):
         text = vary_paragraph_rhythm(text)
-    
-    # Pass 4: Scene-specific
-    if config.get('add_casual', False) or aggressive:
-        text = add_casual_expressions(text, casualness)
-    
-    if config.get('shorten_paragraphs', False):
-        text = shorten_paragraphs(text)
-    
-    # ── NEW: Three perplexity-boosting strategies ──
-    
-    # Strategy 1: Low-frequency bigram injection (always active)
-    bigram_strength = 0.5 if aggressive else 0.3
-    text = reduce_high_freq_bigrams(text, strength=bigram_strength)
-    
-    # Strategy 2 & 3: Noise injection (skipped with --no-noise)
-    if _USE_NOISE:
-        # Strategy 3: Noise expression injection
+
+    # Pass 4: Scene-specific — only at full tier
+    if tier == 'full':
+        if config.get('add_casual', False) or aggressive:
+            text = add_casual_expressions(text, casualness)
+            # Sentence-end particles (吧/嘛/呗) — cycle 14 tried but caused xhs regression
+            # (seed=42: 53 → 59). Random state shift + downstream interaction. Parked.
+        if config.get('shorten_paragraphs', False):
+            text = shorten_paragraphs(text)
+
+    # ── Perplexity-boosting strategies — tier-gated ──
+    # Bigram substitution active in moderate+full (safe, targeted)
+    if tier != 'conservative':
+        bigram_strength = 0.5 if aggressive else 0.3
+        if tier == 'moderate':
+            bigram_strength *= 0.6
+        text = reduce_high_freq_bigrams(text, strength=bigram_strength, scene=scene)
+
+    # Noise + sentence randomization only at full tier — these are the operations
+    # that on HC3 sometimes added spurious AI patterns to already-clean text.
+    if tier == 'full' and _USE_NOISE:
         noise_density = 0.25 if aggressive else 0.15
         text = inject_noise_expressions(text, density=noise_density, style='general')
-        
-        # Strategy 2: Sentence length randomization
         text = randomize_sentence_lengths(text, aggressive=aggressive, seed=seed)
     
     # Clean up artifacts
@@ -998,16 +1291,24 @@ def main():
                        help='跳过统计优化（困惑度反馈），回退到纯规则替换')
     parser.add_argument('--no-noise', action='store_true',
                        help='跳过噪声策略（句长随机化 + 噪声表达插入）')
-    
+    parser.add_argument('--quick', action='store_true',
+                       help='快速模式（= --no-stats --no-noise），只跑短语替换 + 结构清理')
+    parser.add_argument('--cilin', action='store_true',
+                       help='用 CiLin 同义词词林扩展候选（~40K 词 vs 手工 200 词）')
+
     args = parser.parse_args()
-    
+
     # Toggle stats optimization
     global _USE_STATS
-    _USE_STATS = not args.no_stats
-    
+    _USE_STATS = not (args.no_stats or args.quick)
+
     # Toggle noise strategies
     global _USE_NOISE
-    _USE_NOISE = not args.no_noise
+    _USE_NOISE = not (args.no_noise or args.quick)
+
+    # Toggle CiLin expansion
+    global _USE_CILIN
+    _USE_CILIN = args.cilin
     
     # Read input
     if args.file:

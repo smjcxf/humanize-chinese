@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# Unified CLI shim — forwards to scripts/humanize.py
+# Usage: ./humanize <subcommand> [args]
+#        humanize detect 论文.txt
+#        humanize academic 论文.txt -o 改后.txt --compare
+set -eu
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+exec python3 "$DIR/scripts/humanize.py" "$@"

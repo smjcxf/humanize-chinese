@@ -6,9 +6,22 @@ Chinese Text Style Transformer v2.0
 """
 
 import sys
+import os
 import re
 import random
 import argparse
+
+# Pre-humanize before applying style: strip AI power-words (赋能/抓手/降本增效…) first,
+# then apply style transform. Without this the style transform only adds emoji/tone
+# markers while leaving the AI buzzword core intact, which is why the v2.1 social
+# sample went 95→81 instead of the README's claimed 72→8.
+try:
+    from humanize_cn import humanize as _humanize_text
+except ImportError:
+    try:
+        from scripts.humanize_cn import humanize as _humanize_text
+    except ImportError:
+        _humanize_text = None
 
 # ─── 风格配置 ───
 
@@ -524,13 +537,32 @@ TRANSFORM_MAP = {
     'weibo': transform_weibo,
 }
 
-def apply_style(text, style_name):
-    """应用指定风格"""
+_STYLE_TO_SCENE = {
+    'casual':      'social',
+    'zhihu':       'social',
+    'xiaohongshu': 'social',
+    'wechat':      'social',
+    'academic':    'formal',
+    'literary':    'general',
+    'weibo':       'social',
+}
+
+
+def apply_style(text, style_name, humanize_first=True, seed=None):
+    """应用指定风格。
+
+    humanize_first: 先跑一遍 humanize_cn 去掉 AI 词（赋能/抓手/降本增效 等），
+    再做风格转换。默认开启，可用 --no-humanize 关闭。
+    """
     if style_name not in STYLES:
         print(f'错误: 不支持的风格 "{style_name}"', file=sys.stderr)
         print(f'支持的风格: {", ".join(STYLES.keys())}', file=sys.stderr)
         sys.exit(1)
-    
+
+    if humanize_first and _humanize_text is not None:
+        scene = _STYLE_TO_SCENE.get(style_name, 'general')
+        text = _humanize_text(text, scene=scene, aggressive=False, seed=seed)
+
     transform_fn = TRANSFORM_MAP.get(style_name)
     if transform_fn:
         return transform_fn(text)
@@ -552,7 +584,9 @@ def main():
     parser.add_argument('-o', '--output', help='输出文件路径')
     parser.add_argument('--list', action='store_true', help='列出所有风格')
     parser.add_argument('--seed', type=int, help='随机种子')
-    
+    parser.add_argument('--no-humanize', action='store_true',
+                       help='关闭风格转换前的 humanize 预处理（默认开启，去除 AI 词）')
+
     args = parser.parse_args()
     
     if args.list:
@@ -582,7 +616,7 @@ def main():
         print('错误: 输入为空', file=sys.stderr)
         sys.exit(1)
     
-    result = apply_style(text, args.style)
+    result = apply_style(text, args.style, humanize_first=not args.no_humanize, seed=args.seed)
     
     if args.output:
         with open(args.output, 'w', encoding='utf-8') as f:
