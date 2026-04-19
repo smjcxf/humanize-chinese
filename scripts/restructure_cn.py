@@ -738,11 +738,24 @@ _SHORT_REACTIONS_CASUAL = [
 # Caveat: only insert if the clause BEFORE the marker is 8+ Chinese chars
 # with no existing comma.
 _COMMA_BEFORE_MARKERS = (
+    # Copula + noun
     '是一种', '是一项', '是一个', '是我们', '是可以',
     '是提升', '是提高', '是促进', '是加强', '是时间', '是一类',
+    # Modal / aux
     '能够', '可以', '具有', '需要', '将会', '已经',
     '逐步', '一直', '正在', '不仅', '而且',
     '有着', '才能', '因而',
+    # V + le — common academic verb-past pattern (E-3)
+    '丰富了', '提供了', '引起了', '提升了', '奠定了',
+    '创造了', '推动了', '产生了', '揭示了', '展现了',
+    '带来了', '形成了', '构建了', '拓展了', '优化了',
+    '提出了', '收到了', '达到了', '实现了', '促进了',
+    # V + chu — aspectual (E-3)
+    '呈现出', '显现出', '表现出', '表达出',
+    # V + zhe — continuous action (E-3)
+    '扮演着', '发挥着', '起着', '承担着', '承载着',
+    # Attribution style (softer than splitting)
+    '表明', '揭示', '显示', '发现', '证实', '体现',
 )
 
 
