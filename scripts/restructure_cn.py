@@ -733,6 +733,92 @@ _SHORT_REACTIONS_CASUAL = [
 ]
 
 
+# Comma-insertion markers — keys where inserting a comma before them is
+# grammatically safe in Chinese. Ordered by preference (most natural first).
+# Caveat: only insert if the clause BEFORE the marker is 8+ Chinese chars
+# with no existing comma.
+_COMMA_BEFORE_MARKERS = (
+    '是一种', '是一项', '是一个', '是我们', '是可以',
+    '是提升', '是提高', '是促进', '是加强', '是时间', '是一类',
+    '能够', '可以', '具有', '需要', '将会', '已经',
+    '逐步', '一直', '正在', '不仅', '而且',
+    '有着', '才能', '因而',
+)
+
+
+def boost_comma_density(text, target=4.7):
+    """Insert commas at safe natural-pause points when density is below target.
+
+    HC3 calibration: humans median 5.30/100 chars, AI 3.81. detect_cn flags
+    < 4.5. Restructuring sometimes leaves density below threshold — this
+    function adds commas at grammatically safe spots to compensate.
+
+    Strategy: scan sentences; for each sentence >= 15 Chinese chars with
+    at most 1 existing comma, find a natural pause marker in the middle
+    (6+ chars from start) and insert a comma before it. Only processes
+    as many sentences as needed to clear the threshold.
+
+    Args:
+        text: input text (already passed through other restructure steps)
+        target: target density per 100 non-whitespace chars (default 4.7)
+
+    Returns:
+        text with 0+ commas added
+    """
+    non_ws = sum(1 for c in text if not c.isspace())
+    if non_ws < 100:
+        return text
+    commas = text.count('，') + text.count(',')
+    current = commas / non_ws * 100
+    if current >= target:
+        return text
+    # How many commas do we need to reach target?
+    needed = int((target - current) * non_ws / 100) + 1
+
+    # Walk through sentences; for each eligible long clause, insert one comma
+    # at the first safe marker position.
+    pieces = re.split(r'([。！？\n]+)', text)
+    out = []
+    added = 0
+    for piece in pieces:
+        if added >= needed or not piece or piece[0] in '。！？\n':
+            out.append(piece)
+            continue
+        sent = piece
+        # Count Chinese chars and existing commas in this sentence
+        cn_chars = sum(1 for c in sent if '\u4e00' <= c <= '\u9fff')
+        if cn_chars < 15 or sent.count('，') + sent.count(',') >= 2:
+            out.append(piece)
+            continue
+        # Find first safe marker at position >= 6 Chinese chars from start
+        # (and with no comma before it already)
+        best_pos = -1
+        for marker in _COMMA_BEFORE_MARKERS:
+            idx = sent.find(marker)
+            if idx <= 0:
+                continue
+            # Count Chinese chars before this idx
+            prefix = sent[:idx]
+            prefix_cn = sum(1 for c in prefix if '\u4e00' <= c <= '\u9fff')
+            if prefix_cn < 6:
+                continue
+            # No comma in the last 6 chars before marker (avoid double-comma-tight)
+            tail_prefix = prefix[-6:] if len(prefix) > 6 else prefix
+            if '，' in tail_prefix or ',' in tail_prefix:
+                continue
+            # Don't insert at very end either (need some stuff after)
+            suffix_cn = sum(1 for c in sent[idx:] if '\u4e00' <= c <= '\u9fff')
+            if suffix_cn < 4:
+                continue
+            best_pos = idx
+            break
+        if best_pos > 0:
+            sent = sent[:best_pos] + '，' + sent[best_pos:]
+            added += 1
+        out.append(sent)
+    return ''.join(out)
+
+
 def insert_short_reactions(text, target_short_frac=0.15, max_per_paragraph=1, seed=None, min_sentences=3):
     """Inject short reaction sentences at paragraph seams where short_frac is low.
 
@@ -1012,6 +1098,11 @@ def deep_restructure(text, aggressive=False, scene='general'):
 
     # 4b. 短句插入 — MUST run AFTER merge_short_sentences (cycle 22 bug fix).
     text = insert_short_reactions(text)
+
+    # 4c. 逗号密度补足 — HC3 calibration: human 5.30 median vs AI 3.81 (d=-0.47).
+    # detect_cn threshold 4.5. If humanized output fell below, nudge up via
+    # safe comma insertion at natural pause points. Cycle 35 (E-2).
+    text = boost_comma_density(text, target=4.7)
 
     # 5. 信息重排（仅对多段落文本生效）
     if '\n\n' in text:
