@@ -832,7 +832,7 @@ def boost_comma_density(text, target=4.7):
     return ''.join(out)
 
 
-def insert_short_reactions(text, target_short_frac=0.15, max_per_paragraph=1, seed=None, min_sentences=3):
+def insert_short_reactions(text, target_short_frac=0.15, max_per_paragraph=1, seed=None, min_sentences=3, scene='general'):
     """Inject short reaction sentences at paragraph seams where short_frac is low.
 
     Only injects when:
@@ -853,12 +853,12 @@ def insert_short_reactions(text, target_short_frac=0.15, max_per_paragraph=1, se
         random.seed(seed)
     paragraphs = text.split('\n\n')
     return '\n\n'.join(
-        _insert_reactions_in_paragraph(p, target_short_frac, max_per_paragraph, min_sentences)
+        _insert_reactions_in_paragraph(p, target_short_frac, max_per_paragraph, min_sentences, scene)
         for p in paragraphs
     )
 
 
-def _insert_reactions_in_paragraph(p, target, max_per, min_sentences=3):
+def _insert_reactions_in_paragraph(p, target, max_per, min_sentences=3, scene='general'):
     parts = re.split(r'([。！？])', p)
     sentences = []
     i = 0
@@ -889,7 +889,16 @@ def _insert_reactions_in_paragraph(p, target, max_per, min_sentences=3):
     if cn_lens[last_idx] < 15:
         return p  # last sentence is already short; don't pile on
 
-    if random.random() < 0.35:
+    # For non-social scenes, use adaptive probability: larger gap to target
+    # → more likely to insert. Social scene keeps fixed low prob to avoid
+    # disrupting downstream style transforms (xhs hashtags/emojis dilute
+    # comma density when extra reactions pile up — cycle 37).
+    if scene == 'social':
+        prob = 0.35
+    else:
+        gap = max(0.0, target - current_short_frac)
+        prob = min(0.85, 0.35 + gap * 3.0)
+    if random.random() < prob:
         reaction = random.choice(_SHORT_REACTIONS_NEUTRAL)
         sentences.append(reaction)
 
@@ -1110,12 +1119,13 @@ def deep_restructure(text, aggressive=False, scene='general'):
     text = remove_ai_fillers(text, delete_prob=delete_prob)
 
     # 4b. 短句插入 — MUST run AFTER merge_short_sentences (cycle 22 bug fix).
-    text = insert_short_reactions(text)
+    text = insert_short_reactions(text, scene=scene)
 
     # 4c. 逗号密度补足 — HC3 calibration: human 5.30 median vs AI 3.81 (d=-0.47).
-    # detect_cn threshold 4.5. If humanized output fell below, nudge up via
-    # safe comma insertion at natural pause points. Cycle 35 (E-2).
-    text = boost_comma_density(text, target=4.7)
+    # detect_cn threshold 4.5, human mean 5.30. Target 5.0 gives headroom for
+    # downstream xhs/style transforms that dilute density by adding non-comma
+    # chars (emojis, symbols). Cycle 35 (E-2), retuned cycle 37 (E-4).
+    text = boost_comma_density(text, target=5.0)
 
     # 5. 信息重排（仅对多段落文本生效）
     if '\n\n' in text:
