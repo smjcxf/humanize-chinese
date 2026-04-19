@@ -646,8 +646,21 @@ def randomize_sentence_lengths(text, aggressive=False, seed=None):
         if (i + 1 < len(sentences) and random.random() < merge_rate):
             s2, p2 = sentences[i + 1]
             cn_len2 = len(re.findall(r'[\u4e00-\u9fff]', s2))
-            # Merge if combined length reasonable (< 100 chars)
-            if cn_len + cn_len2 < 100:
+            # Don't merge if adjacent sentence is a known reaction phrase (cycle 22
+            # bug fix — short reactions inserted by `insert_short_reactions` were
+            # being silently merged back, collapsing the short_frac signal).
+            _reactions = (
+                '的确', '确实如此', '颇有道理', '不无道理', '事出有因',
+                '耐人寻味', '值得深思', '让人深思', '可见一斑', '有一定道理',
+                '各有道理', '各有说法', '难以一概', '难以断言', '说来话长',
+                '一言难尽',
+            )
+            s_stripped = s.strip()
+            s2_stripped = s2.strip()
+            if s_stripped in _reactions or s2_stripped in _reactions:
+                # Preserve reaction as standalone sentence
+                pass
+            elif cn_len + cn_len2 < 100:
                 merged = s.rstrip() + '，' + s2.lstrip()
                 result.append(merged + p2)
                 i += 2

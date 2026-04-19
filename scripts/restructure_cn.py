@@ -986,18 +986,18 @@ def deep_restructure(text, aggressive=False):
     # 2. 长句拆分
     text = split_long_sentences(text)
 
-    # 2b. 短句插入 — cycle 11 alternative to diversify_sentence_lengths (cycle 6,
-    # which failed due to orphan predicates from comma splitting). Inserts complete
-    # 3-6 char neutral reactions at paragraph seams to boost short_frac toward the
-    # human baseline (~25%), tackling the `low_short_sentence_fraction` detector
-    # (HC3 d=1.21) on the humanize-output side.
-    text = insert_short_reactions(text)
-
     # 3. 短句合并
     text = merge_short_sentences(text)
 
     # 4. AI 废话删除
     text = remove_ai_fillers(text, delete_prob=delete_prob)
+
+    # 4b. 短句插入 — MUST run AFTER merge_short_sentences (cycle 22 bug fix:
+    # cycle 11's placement before merge caused inserted reactions to be swallowed).
+    # Inserts complete 3-6 char neutral reactions at paragraph ends to boost
+    # short_frac toward the human baseline (~25%), tackling the
+    # `low_short_sentence_fraction` detector (HC3 d=1.21).
+    text = insert_short_reactions(text)
 
     # 5. 信息重排（仅对多段落文本生效）
     if '\n\n' in text:
