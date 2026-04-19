@@ -4,7 +4,7 @@
 
 [![GitHub stars](https://img.shields.io/github/stars/voidborne-d/humanize-chinese?style=flat-square)](https://github.com/voidborne-d/humanize-chinese)
 [![ClawHub](https://img.shields.io/badge/clawhub-humanize--chinese-blue?style=flat-square)](https://clawhub.com/skills/humanize-chinese)
-[![License: MIT](https://img.shields.io/badge/License-MIT-green?style=flat-square)](LICENSE)
+[![License: MIT Non-Commercial](https://img.shields.io/badge/License-MIT_Non--Commercial-yellow?style=flat-square)](LICENSE)
 [![Python](https://img.shields.io/badge/Python-3.6+-blue?style=flat-square)](https://python.org)
 [![Claude Code](https://img.shields.io/badge/Claude_Code-compatible-orange?style=flat-square)](#claude-code)
 
@@ -59,48 +59,36 @@
 
 ---
 
-## HC3-Chinese 基准测试
+## 真实数据测试
 
-在 [HC3-Chinese](https://github.com/Hello-SimpleAI/chatgpt-comparison-detection)（12,853 对人类/ChatGPT 真实问答）上的实测，100 样本平衡抽样（seed=42，2026-04-19 最新）：
+我们用 [HC3-Chinese](https://github.com/Hello-SimpleAI/chatgpt-comparison-detection) 公开数据集（12,853 对人类 vs ChatGPT 真实问答）做了基准测试，随机抽 100 对看工具的实际效果。
 
-| 指标 | 数值 |
-|---|---|
-| 检测器正确分离率（人类 vs ChatGPT） | **73.0%** |
-| 人类平均分 / ChatGPT 平均分 | 8.8 / 18.8 |
-| 分数差距（检测区分力） | **9.9 分** |
-| humanize 平均降幅 | **4.2 分** |
-| 有降低的样本 | 43/100 |
-| 降幅范围 | [-13, +27] |
-| 段落保留率 | 91.0% |
+### 检测器表现
 
-**按数据集领域：**
+| 能力 | 数值 | 说明 |
+|---|---|---|
+| 区分 AI 和人写的能力 | **73%** | 随机抽一对文本，检测器给 AI 打分更高的概率 |
+| AI 原分 vs 人类原分 | 18.8 vs 8.8 | 差 10 分，检测器能明显区分 |
 
-| 领域 | ChatGPT 原分 | humanize 后 | 降幅 |
+### 改写效果
+
+| 领域 | AI 原分 | 改写后 | 下降 |
 |---|---|---|---|
-| psychology | 25.6 | 20.2 | -5.4 |
-| medicine | 22.4 | 10.9 | **-11.5** |
-| law | 24.5 | 14.9 | **-9.6** |
-| open_qa | 22.2 | 14.7 | -7.5 |
-| finance | 16.5 | 13.8 | -2.7 |
-| nlpcc_dbqa | 4.2 | 4.1 | -0.1 |
-| baike | 5.0 | 4.1 | -0.9 |
+| 🏥 医学问答 | 22.4 | 10.9 | **-11.5** |
+| ⚖️ 法律问答 | 24.5 | 14.9 | **-9.6** |
+| 🧠 心理咨询 | 25.6 | 20.2 | -5.4 |
+| 💬 开放问答 | 22.2 | 14.7 | -7.5 |
+| 💰 金融问答 | 16.5 | 13.8 | -2.7 |
+| 📚 百科问答 | 5.0 | 4.1 | -0.9 |
+| 🔍 事实问答 | 4.2 | 4.1 | -0.1 |
 
-**演进史**（从 Phase 2 到 Phase 3 特征校准）：
+**简单说：长文本、专业领域（医学/法律/问答）改写效果最好，能降 7-11 分。**
 
-| 版本 | 正确分离率 | 分数差距 | 平均降幅 |
-|---|---|---|---|
-| Phase 2 baseline | 51% | 3.1 | +1.6 |
-| + 句长 CV (d=1.22) 和短句占比 (d=1.21) | 62% | 11.2 | +5.3 |
-| + 逗号密度 (HC3 d=-0.47) | **73%** | 9.9 | +4.2 |
+### 需要知道的
 
-**检测 accuracy 从 51% 提到 73%（+22 pts）**，检测区分力翻 3 倍。
-
-**诚实的说明**：
-- 真实 ChatGPT 输出不像「AI 样板文」那么极端，HC3 上 baseline 平均约 19 分（Phase 3 加了强特征后拉高的）
-- 刻板化 AI 文本（论文模板、小红书八股）降幅会大得多，见上方示例
-- 长文本领域（医学/法律/问答/心理学）降幅最大 5-11 分
-- 短文本问答（baike/nlpcc_dbqa）降幅小，因 ChatGPT 原分本就低
-- 所有阈值都基于 HC3-Chinese 300+300 人类-AI Cohen's d 校准——不是拍脑袋设的
+- **真实 ChatGPT 不等于"AI 样板文"**。HC3 里的 ChatGPT 原始分数就只有 5-25 分（本来就不那么明显），所以降幅只有几分。但如果是典型的八股 AI 文（论文模板/小红书腔），降幅会大得多（见上面的 50+ 分示例）。
+- **短问答难降**：百科、事实类问答本身字数少，AI 特征不明显，工具发挥空间有限。
+- **所有阈值都有依据**：每个检测特征都在 600 对人类-AI 样本上标定过，不是拍脑袋设的。
 
 自己跑一遍：
 
@@ -388,4 +376,12 @@ for f in *.md; do ./humanize rewrite "$f" -a -o "${f%.md}_clean.md"; done
 
 ## License
 
-MIT — 随便用，不用付钱，不用署名。
+**MIT Non-Commercial** — 个人学习、学术研究、非商业开源项目随便用。
+
+**禁止商业使用**，包括但不限于：
+- 卖本软件或基于本软件的衍生品
+- 把工具包装成付费服务（SaaS / API / 网页服务等）
+- 集成到商业产品中作为功能卖点
+- 用本软件给客户提供付费改写 / AI 检测服务
+
+如需商业授权，请通过 [GitHub repo](https://github.com/voidborne-d/humanize-chinese) 联系作者。
