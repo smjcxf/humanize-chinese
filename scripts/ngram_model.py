@@ -1047,6 +1047,69 @@ LR_FEATURE_NAMES = (
 )
 
 
+_LR_COEF_CACHE = None
+_LR_COEF_FILE = os.path.join(SCRIPT_DIR, 'lr_coef_cn.json')
+
+
+def _load_lr_coef(path=None):
+    """Load LR coefficients + scaler stats from JSON. Cached."""
+    global _LR_COEF_CACHE
+    path = path or _LR_COEF_FILE
+    if _LR_COEF_CACHE is not None and _LR_COEF_CACHE.get('_path') == path:
+        return _LR_COEF_CACHE
+    if not os.path.exists(path):
+        _LR_COEF_CACHE = None
+        return None
+    import json
+    with open(path, encoding='utf-8') as f:
+        data = json.load(f)
+    data['_path'] = path
+    _LR_COEF_CACHE = data
+    return data
+
+
+def compute_lr_score(text_or_analysis, coef_path=None):
+    """Score text via LR ensemble (F-path). Returns dict with p_ai, score_0_100,
+    and feature contributions for diagnostics.
+
+    If the coef file is absent (not trained yet) returns None.
+    """
+    coef = _load_lr_coef(coef_path)
+    if coef is None:
+        return None
+
+    vec, names = extract_feature_vector(text_or_analysis)
+    means = coef['mean']
+    scales = coef['scale']
+    weights = coef['coef']
+    intercept = coef['intercept']
+
+    # Standardize then compute logit
+    standardized = [(vec[i] - means[i]) / (scales[i] if scales[i] else 1.0)
+                    for i in range(len(vec))]
+    logit = intercept + sum(standardized[i] * weights[i] for i in range(len(weights)))
+    import math as _m
+    # Clamp to avoid overflow
+    if logit > 500:
+        p_ai = 1.0
+    elif logit < -500:
+        p_ai = 0.0
+    else:
+        p_ai = 1.0 / (1.0 + _m.exp(-logit))
+    score = round(100 * p_ai)
+
+    contribs = [(names[i], standardized[i] * weights[i]) for i in range(len(weights))]
+    contribs.sort(key=lambda x: -abs(x[1]))
+
+    return {
+        'p_ai': p_ai,
+        'score': score,
+        'logit': logit,
+        'top_contributions': contribs[:5],
+        'features': dict(zip(names, vec)),
+    }
+
+
 def extract_feature_vector(text_or_analysis):
     """Flatten analyze_text output into a fixed-length 18-feature vector for LR.
 
