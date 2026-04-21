@@ -9,3 +9,6 @@ scripts/ngram_freq_cn_human.json
 # Regenerate via: python evals/compression_oracle.py --build-seeds
 evals/compression_ai_seed.txt
 evals/compression_human_seed.txt
+
+# Local-only: I-path academic LR coefficient files (regenerable)
+scripts/lr_coef_academic.json
